@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2005-2026 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -19,6 +19,7 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,8 @@ protected:
   std::shared_ptr<CGUIListItem> m_lastItem;
 
   int m_pageControl;
+  std::optional<int>
+      m_lastPageControlOffset; // cached offset to avoid redundant page control messages
 
   std::list<CGUIListItemLayout> m_layouts;
   std::list<CGUIListItemLayout> m_focusedLayouts;
@@ -217,11 +220,20 @@ protected:
 
   struct RENDERITEM
   {
+    // user-defined ctor for XCode 15.2 and emplace_back
+    RENDERITEM(float newPosX,
+               float newPosY,
+               std::shared_ptr<CGUIListItem> newItem,
+               bool newFocused);
+
     float posX;
     float posY;
     std::shared_ptr<CGUIListItem> item;
     bool focused;
   };
+
+  // Cached render items to avoid per-frame vector allocation
+  std::vector<RENDERITEM> m_renderItems;
 
 private:
   bool OnContextMenu();

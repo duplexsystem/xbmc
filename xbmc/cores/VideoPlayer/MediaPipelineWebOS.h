@@ -12,6 +12,7 @@
 #include "DVDMessageQueue.h"
 #include "DVDStreamInfo.h"
 #include "IVideoPlayer.h"
+#include "cores/AudioEngine/Utils/AELimiter.h"
 #include "threads/Thread.h"
 #include "utils/BitstreamStats.h"
 
@@ -75,10 +76,9 @@ public:
    * @brief Check if a codec is supported by the pipeline.
    * @param codec AVCodecID to check.
    * @param profile profile to check.
-   * @param includeSecure If true, include secure codecs in the check.
    * @return True if supported, false otherwise.
    */
-  static bool Supports(AVCodecID codec, int profile, bool includeSecure = false);
+  static bool Supports(AVCodecID codec, int profile);
 
   /**
    * @brief Flush all pending video messages.
@@ -201,6 +201,12 @@ public:
    * @return Channel count.
    */
   int GetAudioChannels() const { return m_audioHint.channels; }
+
+  /**
+   * @brief Set dynamic range compression for audio playback.
+   * @param drc Dynamic range compression level.
+   */
+  void SetDynamicRangeCompression(long drc);
 
   /**
    * @brief Enable or disable subtitle rendering.
@@ -404,6 +410,7 @@ private:
   std::unique_ptr<ActiveAE::CActiveAEBufferPool> m_encoderBuffers{nullptr};
   std::unique_ptr<ActiveAE::CActiveAEBufferPoolResample> m_audioResample{nullptr};
   std::unique_ptr<CAEEncoderFFmpeg> m_audioEncoder{nullptr};
+  CAELimiter m_audioLimiter;
   std::atomic<unsigned long> m_droppedFrames{0};
   std::chrono::duration<double, std::ratio<1, DVD_TIME_BASE>> m_audioClock{0.0};
 
@@ -418,6 +425,9 @@ private:
   CDVDClock& m_clock;
   CDVDOverlayContainer& m_overlayContainer;
   bool m_hasAudio{true};
+
+  std::atomic<bool> m_videoClosed{true};
+  std::atomic<bool> m_audioClosed{true};
 
   std::mutex m_audioInfoMutex;
   std::string m_audioInfo;

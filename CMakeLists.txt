@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 if(WIN32)
-  cmake_minimum_required(VERSION 3.28)
+  cmake_minimum_required(VERSION 3.30.6)
 endif()
 
 project(kodi LANGUAGES CXX C ASM)
@@ -34,6 +34,12 @@ if(POLICY CMP0144)
   cmake_policy(SET CMP0144 NEW)
 endif()
 
+# use old behaviour for FetchContent
+if(POLICY CMP0168)
+  set(CMAKE_POLICY_DEFAULT_CMP0168 OLD)
+  cmake_policy(SET CMP0168 OLD)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/modules)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/modules/buildtools)
 if(DEPENDS_DIR)
@@ -56,7 +62,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # set KODI_MIRROR to the default if not already set
 if(NOT DEFINED KODI_MIRROR)
-  set(KODI_MIRROR "http://mirrors.kodi.tv")
+  set(KODI_MIRROR "https://mirrors.kodi.tv")
 endif()
 
 message(STATUS "Mirror download location: ${KODI_MIRROR}")
@@ -114,14 +120,20 @@ option(ENABLE_INTERNAL_FFMPEG "Enable internal ffmpeg?" OFF)
 
 # These are built for all platforms not using system libs or disabled by user
 dependent_option(ENABLE_INTERNAL_ASS "Enable internal libass?")
+dependent_option(ENABLE_INTERNAL_BLURAY "Enable internal libbluray?")
 dependent_option(ENABLE_INTERNAL_CEC "Enable internal libcec?")
 dependent_option(ENABLE_INTERNAL_CURL "Enable internal libcurl?")
+dependent_option(ENABLE_INTERNAL_DAV1D "Enable internal dav1d?")
 dependent_option(ENABLE_INTERNAL_EXIV2 "Enable internal exiv2?")
 dependent_option(ENABLE_INTERNAL_FLATBUFFERS "Enable internal flatbuffers?")
 dependent_option(ENABLE_INTERNAL_FMT "Enable internal fmt?")
+dependent_option(ENABLE_INTERNAL_LIBMICROHTTPD  "Enable internal libmicrohttpd?")
+dependent_option(ENABLE_INTERNAL_LZO2 "Enable internal lzo2?")
 dependent_option(ENABLE_INTERNAL_NFS "Enable internal libnfs?")
 dependent_option(ENABLE_INTERNAL_PCRE2 "Enable internal pcre2?")
+dependent_option(ENABLE_INTERNAL_MARIADBCLIENT "Enable internal mariadb-c-connector?")
 dependent_option(ENABLE_INTERNAL_NLOHMANNJSON "Enable internal nlohmannjson?")
+dependent_option(ENABLE_INTERNAL_UDFREAD "Enable internal libudfread?")
 dependent_option(ENABLE_INTERNAL_XSLT "Enable internal libxslt?")
 
 # If ENABLE_INTERNAL_FMT is ON, we force ENABLE_INTERNAL_SPDLOG ON as it has a hard
@@ -142,9 +154,6 @@ endif()
 if(UNIX)
   option(FFMPEG_PATH        "Path to external ffmpeg?" "")
   option(ENABLE_INTERNAL_FSTRCMP "Enable internal fstrcmp?" OFF)
-  if(ENABLE_INTERNAL_FFMPEG)
-    option(ENABLE_INTERNAL_DAV1D "Enable internal dav1d?" OFF)
-  endif()
   option(ENABLE_INTERNAL_GTEST "Enable internal gtest?" OFF)
 endif()
 
@@ -261,7 +270,6 @@ set(optional_deps Alsa>=1.0.27
                   Bluray>=0.9.3
                   CAP
                   CEC>=4.0.0
-                  Dav1d
                   DBus
                   Iso9660pp>=2.1.0
                   LCMS2>=2.10
@@ -634,6 +642,10 @@ if(FFMPEG_LINK_EXECUTABLE)
 endif()
 if(FFMPEG_CREATE_SHARED_LIBRARY)
   set(CMAKE_CXX_CREATE_SHARED_LIBRARY "${FFMPEG_CREATE_SHARED_LIBRARY}")
+endif()
+if(FFMPEG_XCODE_WRAPPER)
+  set(CMAKE_XCODE_ATTRIBUTE_LD "${FFMPEG_XCODE_WRAPPER}")
+  set(CMAKE_XCODE_ATTRIBUTE_LDPLUSPLUS "${FFMPEG_XCODE_WRAPPER}")
 endif()
 
 # Platform specific additional extra targets

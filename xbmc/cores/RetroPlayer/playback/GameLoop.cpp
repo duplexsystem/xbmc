@@ -25,7 +25,9 @@ constexpr auto PAUSE_SLEEP = 5s;
 } // namespace
 
 CGameLoop::CGameLoop(IGameLoopCallback* callback, double fps)
-  : CThread("GameLoop"), m_callback(callback), m_fps(fps ? fps : DEFAULT_FPS)
+  : CThread("GameLoop"),
+    m_callback(callback),
+    m_fps(fps != 0.0 ? fps : DEFAULT_FPS)
 {
 }
 
@@ -121,6 +123,9 @@ void CGameLoop::Process(void)
         m_sleepEvent.Wait(sleepTimeUs);
     }
   }
+
+  // Notify the callback that the loop has finished processing
+  m_callback->EndEvent();
 }
 
 std::chrono::microseconds CGameLoop::FrameTimeUs() const

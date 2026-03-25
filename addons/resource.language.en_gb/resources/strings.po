@@ -1415,7 +1415,9 @@ msgctxt "#294"
 msgid "Create bookmark"
 msgstr ""
 
-#empty string with id 295
+msgctxt "#295"
+msgid "Low latency mode"
+msgstr ""
 
 msgctxt "#296"
 msgid "Clear bookmarks"
@@ -1459,6 +1461,8 @@ msgstr ""
 #. Label of timers state in PVR timer/timer rule window
 #: system/peripherals.xml
 #: system/settings/settings.xml
+#: xbmc/addons/settings/AddonSettings.cpp
+#: xbmc/addons/gui/GUIDialogAddonInfo.cpp
 #: xbmc/addons/gui/GUIDialogAddonSettings.cpp
 #: xbmc/filesystem/AddonsDirectory.cpp
 #: xbmc/pvr/dialogs/GUIDialogPVRTimerSettings.cpp
@@ -3171,7 +3175,7 @@ msgstr ""
 
 #: system/settings/settings.xml
 msgctxt "#667"
-msgid "Enable Dolby Digital (AC3) transcoding"
+msgid "Enable Dolby Digital transcoding"
 msgstr ""
 
 #: system/settings/settings.xml
@@ -5446,7 +5450,7 @@ msgid "File browser"
 msgstr ""
 
 #. Audio Channel count
-#: xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
+#: xbmc/utils/StreamUtils.cpp
 #: xbmc/video/dialogs/GUIDialogAudioSettings.cpp
 msgctxt "#10127"
 msgid "channels"
@@ -5946,7 +5950,13 @@ msgctxt "#12022"
 msgid "Resume from {0:s}"
 msgstr ""
 
-#empty strings from id 12023 to 12307
+#. Label for resuming playback from a certain part
+#: xbmc/video/VideoUtils.cpp
+msgctxt "#12023"
+msgid "Resume from"
+msgstr ""
+
+#empty strings from id 12024 to 12307
 
 #. Label of the show password button in the keyboard dialog
 #: xbmc/dialogs/GUIDialogKeyboardGeneric.cpp
@@ -6667,19 +6677,7 @@ msgctxt "#13141"
 msgid "If you proceed, you might not be able to control this application any longer. Are you sure you want to stop the event server?"
 msgstr ""
 
-#empty strings from id 13142 to 13143
-
-#: xbmc/osx/XBMCHelper.cpp
-msgctxt "#13144"
-msgid "Change Apple Remote mode?"
-msgstr ""
-
-#: xbmc/osx/XBMCHelper.cpp
-msgctxt "#13145"
-msgid "If you are currently using the Apple Remote to control this application, changing this setting might affect your ability to continue controlling it. Do you want to proceed?"
-msgstr ""
-
-#empty strings from id 13146 to 13158
+#empty strings from id 13142 to 13158
 
 #: xbmc/windows/GUIWindowSystemInfo.cpp
 msgctxt "#13159"
@@ -6760,6 +6758,7 @@ msgstr ""
 #: xbmc/GUIInfoManager.cpp
 #: xbmc/LangInfo.cpp
 #: xbmc/addons/gui/GUIDialogAddonSettings.cpp
+#: xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.cpp
 #: xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
 #: xbmc/music/MusicDatabase.cpp
 #: xbmc/peripherals/bus/PeripheralBus.cpp
@@ -7918,63 +7917,14 @@ msgctxt "#13557"
 msgid "Skip delay"
 msgstr ""
 
-#empty strings from id 13558 to 13599
-
-#: system/settings/darwin.xml
-msgctxt "#13600"
-msgid "Apple Remote"
-msgstr ""
+#empty strings from id 13558 to 13600
 
 #: system/settings/darwin_tvos.xml
 msgctxt "#13601"
 msgid "Apple TV"
 msgstr ""
 
-#: system/settings/darwin.xml
-msgctxt "#13602"
-msgid "Allow start of Kodi using the remote"
-msgstr ""
-
-#: system/settings/darwin.xml
-msgctxt "#13603"
-msgid "Sequence delay time"
-msgstr ""
-
-#empty strings from id 13604 to 13609
-
-#: system/settings/darwin.xml
-msgctxt "#13610"
-msgid "Disabled"
-msgstr ""
-
-#: system/settings/darwin.xml
-msgctxt "#13611"
-msgid "Standard"
-msgstr ""
-
-#: system/settings/darwin.xml
-msgctxt "#13612"
-msgid "Universal remote"
-msgstr ""
-
-#: system/settings/darwin.xml
-msgctxt "#13613"
-msgid "Harmony remote"
-msgstr ""
-
-#empty strings from id 13614 to 13619
-
-#: xbmc/osx/XBMCHelper.cpp
-msgctxt "#13620"
-msgid "Apple Remote error"
-msgstr ""
-
-#: xbmc/osx/XBMCHelper.cpp
-msgctxt "#13621"
-msgid "Apple Remote support couldn't be enabled."
-msgstr ""
-
-#empty strings from id 13622 to 13999
+#empty strings from id 13602 to 13999
 
 msgctxt "#14000"
 msgid "Stack"
@@ -8170,7 +8120,6 @@ msgctxt "#14045"
 msgid "{0:d} sec"
 msgstr ""
 
-#: system/settings/darwin.xml
 #: system/settings/settings.xml
 msgctxt "#14046"
 msgid "{0:d} ms"
@@ -14454,7 +14403,20 @@ msgctxt "#20476"
 msgid "Has video extras"
 msgstr ""
 
-#empty strings from id 20477 to 21329
+#. When you create a new profile ask to user if wants to create it in a custom directory
+#: xbmc/profiles/dialogs/GUIDialogProfileSettings.cpp
+msgctxt "#20477"
+msgid "Do you want to create the new profile in a custom directory?"
+msgstr ""
+
+#. Used in smart playlists to select items based on the HDR type (HDR10, HLG, Dolbyvision)
+#: xbmc/playlists/SmartPlayList.cpp
+#: addons/skin.estuary/xml/DialogPlayerProcessInfo.xml
+msgctxt "#20478"
+msgid "DV profile"
+msgstr ""
+
+#empty strings from id 20479 to 21329
 #up to 21329 is reserved for the video db !! !
 
 #: system/settings/settings.xml
@@ -14751,7 +14713,10 @@ msgctxt "#21397"
 msgid "High quality pixel shader v2"
 msgstr ""
 
-#empty string with id 21398
+#: xbmc/dbwrappers/DatabaseQuery.cpp
+msgctxt "#21398"
+msgid "between"
+msgstr ""
 
 msgctxt "#21399"
 msgid "Use tween animations"
@@ -16026,6 +15991,7 @@ msgid "Enable"
 msgstr ""
 
 #. Defines the state of the add-on in the add-on manager window
+#: xbmc/addons/gui/GUIDialogAddonInfo.cpp
 #: xbmc/filesystem/AddonsDirectory.cpp
 msgctxt "#24023"
 msgid "Disabled"
@@ -21415,22 +21381,12 @@ msgctxt "#36415"
 msgid "No info available yet."
 msgstr ""
 
-#. Description of setting with label #13600 "Apple remote"
-#: system/settings/settings.xml
-msgctxt "#36416"
-msgid "Specify the type of remote used."
-msgstr ""
+#empty strings from id 36416 to 36417
 
-#. Description of setting with label #13602 "Allow start of Kodi with remote"
-#: system/settings/settings.xml
-msgctxt "#36417"
-msgid "Always run a Kodi helper so that the remote can be used to start Kodi."
-msgstr ""
-
-#. Description of setting with label #13603 "Sequence delay time"
+#. Description of setting with label #295 "Low latency mode"
 #: system/settings/settings.xml
 msgctxt "#36418"
-msgid "Specify the delay between button sequences on a universal remote."
+msgid "Reduces audio processing latency. Improves playback start, unpause and seek (the audio returns sooner).\nYou can disable this setting if you experience audio issues."
 msgstr ""
 
 #. Description of setting with label #21417 "Settings"
@@ -21490,7 +21446,7 @@ msgstr ""
 #. Description of setting with label #667 "Enable Dolby Digital transcoding"
 #: system/settings/settings.xml
 msgctxt "#36429"
-msgid "Select this if the audio out connection only supports multichannel audio as Dolby Digital 5.1 (AC-3), such as a S/PDIF connection. If your system supports PCM multichannel audio via HDMI, leave this disabled."
+msgid "Select this if the audio out connection only supports multichannel audio as Dolby Digital 5.1 (AC-3), such as a S/PDIF connection. When E-AC3 passthrough is also enabled, Dolby Digital Plus (E-AC3) is used for higher quality. If your system supports PCM multichannel audio via HDMI, leave this disabled."
 msgstr ""
 
 #. Description for setting category #14101: "Video Acceleration"
@@ -22491,19 +22447,7 @@ msgctxt "#37002"
 msgid "(Director's comments 2)"
 msgstr ""
 
-#. DVD short name for 1.0 channel layout
-#: xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
-msgctxt "#37003"
-msgid "mono"
-msgstr ""
-
-#. DVD short name for 2.0 channel layout
-#: xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
-msgctxt "#37004"
-msgid "stereo"
-msgstr ""
-
-#empty strings from id 37005 to 37013
+#empty strings from id 37003 to 37013
 
 #: xbmc/GUIInfoManager.cpp
 msgctxt "#37014"
@@ -23892,13 +23836,16 @@ msgctxt "#39124"
 msgid "Verbose logging for the [B]Add-ons[/B] component"
 msgstr ""
 
-
 #: system/settings/settings.xml
 msgctxt "#39125"
 msgid "Enable tag reading in file view"
 msgstr ""
 
-#empty string with id 39126
+#. Label for component level debug logging setting
+#: xbmc/utils/log.cpp
+msgctxt "#39126"
+msgid "Verbose logging for the [B]Bluray[/B] component"
+msgstr ""
 
 #: system/settings/settings.xml
 msgctxt "#39127"
@@ -24368,7 +24315,19 @@ msgctxt "#39208"
 msgid "Starfish is the hardware video decoder for LG's webOS. Disable it for troubleshooting or testing."
 msgstr ""
 
-#empty strings from id 39209 to 39999
+#. Title of Dolby Vision level 5 metadata zero override setting
+#: system/settings/settings.xml
+msgctxt "#39209"
+msgid "Dolby Vision: Override level 5 metadata to zero"
+msgstr ""
+
+#. Help text for setting "Dolby Vision: Override level 5 metadata to zero" of label #39209
+#: system/settings/settings.xml
+msgctxt "#39210"
+msgid "If enabled, Dolby Vision files will have level 5 (active area) metadata overridden to zero offsets. Enable if your display has issues with incorrectly cropped image in Dolby Vision playback."
+msgstr ""
+
+#empty strings from id 39211 to 39999
 
 # 40000 to 40800 are reserved for Video Versions feature
 

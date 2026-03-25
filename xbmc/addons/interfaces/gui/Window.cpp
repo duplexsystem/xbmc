@@ -32,6 +32,7 @@
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
 #include "utils/log.h"
+#include "windowing/WinSystem.h"
 
 #include <source_location>
 
@@ -136,8 +137,12 @@ KODI_GUI_WINDOW_HANDLE Interface_GUIWindow::create(KODI_HANDLE kodiBase,
                CAddonInfo::TranslateType(addon->Type()), addon->Name(), addon->Author());
   }
 
+  auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
+  if (!skin)
+    return nullptr;
+
   RESOLUTION_INFO res;
-  std::string strSkinPath = g_SkinInfo->GetSkinPath(xml_filename, &res);
+  std::string strSkinPath = skin->GetSkinPath(xml_filename, &res);
 
   if (!CFileUtils::Exists(strSkinPath))
   {
@@ -147,9 +152,9 @@ KODI_GUI_WINDOW_HANDLE Interface_GUIWindow::create(KODI_HANDLE kodiBase,
 
     // Check for the matching folder for the skin in the fallback skins folder
     const std::string fallbackPath{URIUtils::AddFileToFolder(addon->Path(), "resources", "skins")};
-    const std::string basePath{URIUtils::AddFileToFolder(fallbackPath, g_SkinInfo->ID())};
+    const std::string basePath{URIUtils::AddFileToFolder(fallbackPath, skin->ID())};
 
-    strSkinPath = g_SkinInfo->GetSkinPath(xml_filename, &res, basePath);
+    strSkinPath = skin->GetSkinPath(xml_filename, &res, basePath);
 
     // Check for the matching folder for the skin in the fallback skins folder (if it exists)
     if (CFileUtils::Exists(basePath))
@@ -229,12 +234,9 @@ void Interface_GUIWindow::destroy(KODI_HANDLE kodiBase, KODI_GUI_WINDOW_HANDLE h
     }
     // Free any window properties
     pAddonWindow->ClearProperties();
-    // free the window's resources and unload it (free all guicontrols)
-    pAddonWindow->FreeResources(true);
-
-    CServiceBroker::GetGUI()->GetWindowManager().Remove(pAddonWindow->GetID());
+    // Unload window, freeing all of its resources
+    CServiceBroker::GetGUI()->GetWindowManager().Delete(pAddonWindow->GetID());
   }
-  delete pAddonWindow;
   Interface_GUIGeneral::unlock();
 }
 

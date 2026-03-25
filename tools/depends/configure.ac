@@ -295,7 +295,7 @@ if test "x$LD" = "x"; then
   AC_MSG_ERROR(No linker found with name ${use_linker}. You may want to provide using --with-linker=<linker>)
 fi
 
-case $build in
+case $host in
   *darwin*)
     # MacOS 11 requires explicit isysroot for autoconf compiler tests
     # However we do not want to pollute CFLAGS/CXXFLAGS once compiler tests are complete
@@ -305,7 +305,7 @@ esac
 
 AC_PROG_CPP
 
-case $build in
+case $host in
   *darwin*)
     CFLAGS=$(echo "$CFLAGS" | sed "s|$host_includes||")
     CXXFLAGS=$(echo "$CXXFLAGS" | sed "s|$host_includes||")
@@ -314,7 +314,7 @@ esac
 case $host in
   *-*linux-android*)
     deps_dir="$use_host-$use_ndk_api-$build_type"
-    platform_cflags="-DANDROID -fexceptions -funwind-tables -fstack-protector-strong -no-canonical-prefixes -fPIC -DPIC"
+    platform_cflags="-DANDROID -fexceptions -funwind-tables -fstack-protector-strong -no-canonical-prefixes -fPIC -DPIC -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64"
     optimize_flags="-Os"
     platform_ldflags="-Wl,--exclude-libs,libgcc.a -Wl,--exclude-libs,libatomic.a -L$prefix/$deps_dir/lib/android-$use_ndk_api"
 
@@ -370,7 +370,7 @@ case $host in
       use_cpu="armeabi-v7a"
     fi
     use_toolchain="${use_toolchain:-/usr}"
-    platform_cflags="-fPIC -DPIC -mcpu=cortex-a9 -mtune=cortex-a53 -mfloat-abi=softfp -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64"
+    platform_cflags="-fPIC -DPIC -mcpu=cortex-a53 -mtune=cortex-a53 -mfloat-abi=softfp -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64"
     platform_cxxflags="$platform_cflags -static-libstdc++"
     optimize_flags="-Os"
     platform_ldflags="-Wl,-rpath-link=$prefix/$deps_dir/lib"
@@ -818,6 +818,7 @@ c = $MESON_CC
 cpp = $MESON_CXX
 ar = '$AR'
 strip = '$STRIP'
+cmake = '$prefix/$tool_dir/bin/cmake'
 pkgconfig = '$prefix/$tool_dir/bin/pkg-config'
 pkg-config = '$prefix/$tool_dir/bin/pkg-config'
 

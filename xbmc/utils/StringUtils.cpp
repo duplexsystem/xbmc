@@ -76,14 +76,6 @@ T NumberFromSS(std::string_view str, T fallback)
 }
 
 /*!
- * Locale unaware version of tolower
- */
-[[nodiscard]] constexpr char ToLowerAscii(char c)
-{
-  return 'A' <= c && c <= 'Z' ? c - 'A' + 'a' : c;
-}
-
-/*!
  * Locale unaware version of toupper
  */
 [[nodiscard]] constexpr char ToUpperAscii(char c)
@@ -378,7 +370,7 @@ wchar_t toupperUnicode(const wchar_t& c)
 template<typename StrIn, typename StrOut, typename Fn>
 void transformString(const StrIn& input, StrOut& output, Fn fn)
 {
-  std::transform(input.begin(), input.end(), output.begin(), fn);
+  std::ranges::transform(input, output.begin(), fn);
 }
 
 std::string StringUtils::ToUpper(std::string_view str)
@@ -459,24 +451,6 @@ bool StringUtils::EqualsNoCase(std::string_view str1, std::string_view str2) noe
   return std::ranges::equal(str1, str2,
                             [](char c1, char c2)
                             { return c1 == c2 || ToLowerAscii(c1) == ToLowerAscii(c2); });
-}
-
-int StringUtils::CompareNoCase(std::string_view str1,
-                               std::string_view str2,
-                               size_t n /* = 0 */) noexcept
-{
-  str1 = n ? str1.substr(0, std::min(n, str1.length())) : str1;
-  str2 = n ? str2.substr(0, std::min(n, str2.length())) : str2;
-  auto diff = std::ranges::mismatch(str1, str2,
-                                    [](char c1, char c2)
-                                    { return c1 == c2 || ToLowerAscii(c1) == ToLowerAscii(c2); });
-  if (diff.in1 == str1.end() && diff.in2 == str2.end())
-    return 0;
-  if (diff.in1 == str1.end())
-    return '\0' - ToLowerAscii(*diff.in2);
-  if (diff.in2 == str2.end())
-    return ToLowerAscii(*diff.in1) - '\0';
-  return ToLowerAscii(*diff.in1) - ToLowerAscii(*diff.in2);
 }
 
 std::string StringUtils::Left(std::string_view str, size_t count)

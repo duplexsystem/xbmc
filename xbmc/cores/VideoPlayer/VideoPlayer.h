@@ -56,6 +56,7 @@ struct SPlayerState
     cache_bytes = 0;
     cache_level = 0.0;
     cache_offset = 0.0;
+    cache_time = 0.0;
     lastSeek = 0;
     streamsReady = false;
   }
@@ -76,7 +77,8 @@ struct SPlayerState
   bool streamsReady;
 
   int chapter;              // current chapter
-  std::vector<std::pair<std::string, int64_t>> chapters; // name and position for chapters
+  // name and position for chapters
+  std::vector<std::pair<std::string, std::chrono::milliseconds>> chapters;
 
   bool canpause;            // pvr: can pause the current playing item
   bool canseek;             // pvr: can seek in the current playing item
@@ -200,6 +202,7 @@ struct SelectionStream
   std::string stereo_mode;
   float aspect_ratio = 0.0f;
   StreamHdrType hdrType = StreamHdrType::HDR_TYPE_NONE;
+  AVDOVIDecoderConfigurationRecord dovi{};
   uint32_t fpsScale{0};
   uint32_t fpsRate{0};
 };
@@ -255,6 +258,12 @@ class CJobQueue;
 class CVideoPlayer : public IPlayer, public CThread, public IVideoPlayer,
                      public IDispResource, public IRenderLoop, public IRenderMsg
 {
+  enum class UpdateStreamDetails : bool
+  {
+    UPDATE_IF_FLAGGED,
+    ALWAYS_UPDATE
+  };
+
 public:
   explicit CVideoPlayer(IPlayerCallback& callback);
   ~CVideoPlayer() override;
@@ -427,6 +436,15 @@ protected:
 
   void SetSubtitleVisibleInternal(bool bVisible);
 
+  enum SubtitleChange
+  {
+    FLAG_STATUS_CHANGE = 0x0001,
+    FLAG_STREAMINFO_CHANGE = 0x0002,
+  };
+  void NotifySubtitleUpdate(int flags);
+  void NotifyAudioUpdate();
+  void NotifyVideoUpdate();
+
   /**
    * one of the DVD_PLAYSPEED defines
    */
@@ -478,10 +496,12 @@ protected:
   int64_t GetTime();
   float GetPercentage();
 
+  virtual bool CanTempo();
+
   virtual void UpdateContent();
   void UpdateContentState();
 
-  void UpdateFileItemStreamDetails(CFileItem& item);
+  void UpdateFileItemStreamDetails(CFileItem& item, UpdateStreamDetails update);
   int GetPreviousChapter();
 
   bool m_players_created;
@@ -594,7 +614,7 @@ protected:
   bool m_HasVideo;
   bool m_HasAudio;
 
-  bool m_UpdateStreamDetails;
+  bool m_updateStreamDetails{false};
 
   std::atomic<bool> m_displayLost;
 

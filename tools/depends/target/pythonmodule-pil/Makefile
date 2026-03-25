@@ -1,5 +1,7 @@
 include ../../Makefile.include PYTHONMODULE-PIL-VERSION ../../download-files.include
-DEPS= ../../Makefile.include Makefile PYTHONMODULE-PIL-VERSION ../../download-files.include pillow-crosscompile.patch
+DEPS= ../../Makefile.include Makefile PYTHONMODULE-PIL-VERSION ../../download-files.include \
+                                  pillow-crosscompile.patch \
+                                  12-android-multi-phase.patch
 
 PYTHONPATH=$(PYTHON_SITE_PKG)
 PILPATH=$(PYTHONPATH)
@@ -65,6 +67,9 @@ $(PLATFORM): $(DEPS) | $(TARBALLS_LOCATION)/$(ARCHIVE).$(HASH_TYPE)
 	rm -rf $(PLATFORM)/*; mkdir -p $(PLATFORM)
 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
 	cd $(PLATFORM); patch -p1 -i ../pillow-crosscompile.patch
+ifeq ($(OS),android)
+	cd $(PLATFORM); patch -p1 -i ../12-android-multi-phase.patch
+endif
 
 $(PILPATHLIB):
 ifeq ($(OS),android)
@@ -74,20 +79,19 @@ else ifeq ($(OS),darwin_embedded)
 endif
 
 .installed-$(PLATFORM): $(PLATFORM) $(PILPATHLIB)
-	cd $(PLATFORM); $(NATIVEPREFIX)/bin/python3 setup.py build_ext $(BUILD_OPTS) install --install-lib $(PILPATH)
+	cd $(PLATFORM); $(NATIVEPREFIX)/bin/python3 setup.py build build_py build_ext $(BUILD_OPTS) install --install-lib $(PILPATH) bdist_egg
 ifeq ($(OS),android)
-	cd $(PILPATHLIB) && unzip -o ../pillow-*.egg
+	unzip -o $(PLATFORM)/dist/pillow-*.egg -d $(PILPATHLIB)
 	cd $(PILPATHLIB)/PIL && \
           sed $(SED_FLAG) -e 's/import sys/import os, sys /' \
                           -e '/__file__/ s/_imaging/lib_imaging/g' \
-                          -e 's/pkg_resources.resource_filename(__name__,/os.path.join(os.environ["KODI_ANDROID_LIBS"], /' \
+                          -e "s/\.*with.*joinpath('\(.*\)').*/__file__ = os.path.join(os.environ[\"KODI_ANDROID_LIBS\"], '\1')/" \
+                          -e 's/^        /    /' \
                               _imaging*.py
-	cd $(PILPATH) && rm -rf pillow-*.egg
 else ifeq ($(OS),darwin_embedded)
-	cd $(PILPATHLIB) && unzip -o ../pillow-*.egg
-	cd $(PILPATH) && rm -rf pillow-*.egg
+	unzip -o $(PLATFORM)/dist/pillow-*.egg -d $(PILPATHLIB)
 else ifeq ($(TARGET_PLATFORM),webos)
-	cd $(PILPATH) && unzip -o $(PILPATH)/pillow-*.egg && rm -f $(PILPATH)/pillow-*.egg
+	unzip -o $(PLATFORM)/dist/pillow-*.egg -d $(PILPATH)
 endif
 	touch $@
 

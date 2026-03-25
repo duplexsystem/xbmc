@@ -11,6 +11,9 @@
 #include "DVDCodecs/DVDCodecs.h"
 #include "DVDCodecs/DVDFactoryCodec.h"
 #include "DVDStreamInfo.h"
+#ifdef HAVE_LIBPOSTPROC
+#include "DVDVideoPPFFmpeg.h"
+#endif
 #include "ServiceBroker.h"
 #include "cores/FFmpeg.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
@@ -309,8 +312,11 @@ enum AVPixelFormat CDVDVideoCodecFFmpeg::GetFormat(struct AVCodecContext * avctx
 
 CDVDVideoCodecFFmpeg::CDVDVideoCodecFFmpeg(CProcessInfo& processInfo)
   : CDVDVideoCodec(processInfo),
-    m_videoBufferPool(std::make_shared<CVideoBufferPoolFFmpeg>()),
-    m_postProc(processInfo)
+    m_videoBufferPool(std::make_shared<CVideoBufferPoolFFmpeg>())
+#ifdef HAVE_LIBPOSTPROC
+    ,
+    m_postProc(std::make_unique<CDVDVideoPPFFmpeg>(processInfo))
+#endif
 {
   m_decoderState = STATE_NONE;
 }
@@ -337,7 +343,9 @@ bool CDVDVideoCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &options
 
   m_formats.clear();
   m_formats = m_processInfo.GetPixFormats();
+#if LIBAVFILTER_BUILD < AV_VERSION_INT(10, 6, 100)
   m_formats.push_back(AV_PIX_FMT_NONE); /* always add none to get a terminated list in ffmpeg world */
+#endif
   m_processInfo.SetSwDeinterlacingMethods();
   m_processInfo.SetVideoInterlaced(false);
 
@@ -854,9 +862,7 @@ CDVDVideoCodec::VCReturn CDVDVideoCodecFFmpeg::GetPicture(VideoPicture* pVideoPi
   {
     SetFilters();
 
-    bool need_scale = std::find(m_formats.begin(),
-                                m_formats.end(),
-                                m_pCodecContext->pix_fmt) == m_formats.end();
+    bool need_scale = std::ranges::find(m_formats, m_pCodecContext->pix_fmt) == m_formats.end();
 
     bool need_reopen = false;
     if (m_filters != m_filters_next)
@@ -918,10 +924,12 @@ bool CDVDVideoCodecFFmpeg::SetPictureParams(VideoPicture* pVideoPicture)
   buffer->SetRef(m_pFrame);
   pVideoPicture->videoBuffer = buffer;
 
-  if (m_processInfo.GetVideoSettings().m_PostProcess)
+  if (m_postProc && m_processInfo.GetVideoSettings().m_PostProcess)
   {
-    m_postProc.SetType(CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoPPFFmpegPostProc, false);
-    m_postProc.Process(pVideoPicture);
+    m_postProc->SetType(
+        CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoPPFFmpegPostProc,
+        false);
+    m_postProc->Process(pVideoPicture);
   }
 
   return true;
@@ -1134,16 +1142,53 @@ bool CDVDVideoCodecFFmpeg::GetPictureCommon(VideoPicture* pVideoPicture)
   pl_map_hdr_metadata(&pVideoPicture->plColorSpace.hdr, &plavhdr);
 
   /*hdr for libplacebo*/
-  AVBufferRef* dovi = NULL;
-  sd = av_frame_get_side_data(m_pFrame, AV_FRAME_DATA_DOVI_METADATA);
-  if (sd)
+  if (pVideoPicture->hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
   {
-    const AVDOVIMetadata* metadata = (const AVDOVIMetadata*)sd->buf->data;
-    const AVDOVIRpuDataHeader* header = av_dovi_get_header(metadata);
-    if (header->disable_residual_flag)
+    sd = av_frame_get_side_data(m_pFrame, AV_FRAME_DATA_DOVI_METADATA);
+    if (sd)
     {
-      pl_map_avdovi_metadata(&pVideoPicture->plColorSpace, &pVideoPicture->plColorRepr,
-                             &pVideoPicture->plDoviMetadata, metadata);
+      const AVDOVIMetadata* metadata = (const AVDOVIMetadata*)sd->buf->data;
+      const AVDOVIRpuDataHeader* header = av_dovi_get_header(metadata);
+      const AVDOVIDataMapping* mapping = av_dovi_get_mapping(metadata);
+
+      // Incoming branch's Dolby Vision specific logic
+      if (header != nullptr && header->el_spatial_resampling_filter_flag == 1 &&
+          header->disable_residual_flag == 0)
+      {
+        pVideoPicture->strDVELType = "MEL";
+        for (int i = 0; i < 3; i++)
+        {
+          if (mapping != nullptr &&
+              (mapping->nlq[i].nlq_offset != 0 || mapping->nlq[i].vdr_in_max != 8388608 ||
+               mapping->nlq[i].linear_deadzone_slope != 0 ||
+               mapping->nlq[i].linear_deadzone_threshold != 0))
+          {
+            pVideoPicture->strDVELType = "FEL";
+            break;
+          }
+        }
+      }
+
+      // HEAD branch's libplacebo mapping for Dolby Vision metadata
+      if (header->disable_residual_flag)
+      {
+        pl_map_avdovi_metadata(&pVideoPicture->plColorSpace, &pVideoPicture->plColorRepr,
+                               &pVideoPicture->plDoviMetadata, metadata);
+      }
+    }
+  }
+
+  // Incoming branch's HDR10+ detection
+  if (pVideoPicture->hdrType == StreamHdrType::HDR_TYPE_HDR10 ||
+      pVideoPicture->hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+  {
+    sd = av_frame_get_side_data(m_pFrame, AV_FRAME_DATA_DYNAMIC_HDR_PLUS);
+    if (sd)
+    {
+      if (pVideoPicture->hdrType == StreamHdrType::HDR_TYPE_HDR10)
+        pVideoPicture->hdrType = StreamHdrType::HDR_TYPE_HDR10PLUS;
+      else
+        pVideoPicture->hdrTypeAlt = StreamHdrType::HDR_TYPE_HDR10PLUS;
     }
   }
 
@@ -1153,7 +1198,6 @@ bool CDVDVideoCodecFFmpeg::GetPictureCommon(VideoPicture* pVideoPicture)
   {
     pl_hdr_metadata_from_dovi_rpu(&pVideoPicture->plColorSpace.hdr, sd->buf->data, sd->buf->size);
   }
-
   if (pVideoPicture->iRepeatPicture)
     pVideoPicture->dts = DVD_NOPTS_VALUE;
   else
@@ -1214,7 +1258,7 @@ int CDVDVideoCodecFFmpeg::FilterOpen(const std::string& filters, bool scale)
     return 0;
   }
 
-  if (!(m_pFilterGraph = avfilter_graph_alloc()))
+  if (!((m_pFilterGraph = avfilter_graph_alloc())))
   {
     CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - unable to alloc filter graph");
     return -1;
@@ -1231,21 +1275,35 @@ int CDVDVideoCodecFFmpeg::FilterOpen(const std::string& filters, bool scale)
       m_pCodecContext->sample_aspect_ratio.num != 0 ? m_pCodecContext->sample_aspect_ratio.num : 1,
       m_pCodecContext->sample_aspect_ratio.num != 0 ? m_pCodecContext->sample_aspect_ratio.den : 1);
 
-  if ((result = avfilter_graph_create_filter(&m_pFilterIn, srcFilter, "src", args.c_str(), NULL, m_pFilterGraph)) < 0)
+  if (!((m_pFilterOut = avfilter_graph_alloc_filter(m_pFilterGraph, outFilter, "out"))))
   {
-    CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - avfilter_graph_create_filter: src");
+    CLog::LogF(LOGERROR, "unable to alloc filter out");
+    return -1;
+  }
+
+#if LIBAVFILTER_BUILD >= AV_VERSION_INT(10, 6, 100)
+  if ((result = av_opt_set_array(m_pFilterOut, "pixel_formats", AV_OPT_SEARCH_CHILDREN, 0,
+                                 m_formats.size(), AV_OPT_TYPE_PIXEL_FMT, m_formats.data())) < 0)
+#else
+  if ((result = av_opt_set_int_list(m_pFilterOut, "pix_fmts", m_formats.data(), AV_PIX_FMT_NONE,
+                                    AV_OPT_SEARCH_CHILDREN)) < 0)
+#endif
+  {
+    CLog::LogF(LOGERROR, "failed setting pix formats");
     return result;
   }
 
-  if ((result = avfilter_graph_create_filter(&m_pFilterOut, outFilter, "out", NULL, NULL, m_pFilterGraph)) < 0)
+  if ((result = avfilter_init_str(m_pFilterOut, nullptr) < 0))
   {
-    CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - avfilter_graph_create_filter: out");
+    CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - avfilter_init_str: out");
+    avfilter_free(m_pFilterOut);
     return result;
   }
-  if ((result = av_opt_set_int_list(m_pFilterOut, "pix_fmts", m_formats.data(), AV_PIX_FMT_NONE,
-                                    AV_OPT_SEARCH_CHILDREN)) < 0)
+
+  if ((result = avfilter_graph_create_filter(&m_pFilterIn, srcFilter, "src", args.c_str(), NULL,
+                                             m_pFilterGraph)) < 0)
   {
-    CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - failed settings pix formats");
+    CLog::Log(LOGERROR, "CDVDVideoCodecFFmpeg::FilterOpen - avfilter_graph_create_filter: src");
     return result;
   }
 

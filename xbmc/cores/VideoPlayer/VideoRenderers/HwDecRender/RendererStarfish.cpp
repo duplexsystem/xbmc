@@ -22,7 +22,10 @@ CRendererStarfish::CRendererStarfish()
   CLog::LogF(LOGINFO, "Instanced");
 }
 
-CRendererStarfish::~CRendererStarfish() = default;
+CRendererStarfish::~CRendererStarfish()
+{
+  CServiceBroker::GetWinSystem()->GetGfxContext().SetTransferPQ(false);
+}
 
 CBaseRenderer* CRendererStarfish::Create(CVideoBuffer* buffer)
 {
@@ -55,6 +58,13 @@ bool CRendererStarfish::Configure(const VideoPicture& picture,
   SetViewMode(m_videoSettings.m_ViewMode);
   ManageRenderArea();
 
+  if (picture.color_transfer == AVCOL_TRC_SMPTE2084 ||
+      picture.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+  {
+    if (CServiceBroker::GetWinSystem()->IsHDRDisplay())
+      CServiceBroker::GetWinSystem()->GetGfxContext().SetTransferPQ(true);
+  }
+
   m_configured = true;
 
   return true;
@@ -84,22 +94,22 @@ bool CRendererStarfish::Register()
 void CRendererStarfish::ManageRenderArea()
 {
   // this hack is needed to get the 2D mode of a 3D movie going
-  const RENDER_STEREO_MODE stereoMode =
+  const RenderStereoMode stereoMode =
       CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode();
-  if (stereoMode == RENDER_STEREO_MODE_MONO)
-    CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RENDER_STEREO_VIEW_LEFT);
+  if (stereoMode == RenderStereoMode::MONO)
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RenderStereoView::LEFT);
 
   CBaseRenderer::ManageRenderArea();
 
-  if (stereoMode == RENDER_STEREO_MODE_MONO)
-    CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RENDER_STEREO_VIEW_OFF);
+  if (stereoMode == RenderStereoMode::MONO)
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RenderStereoView::OFF);
 
   switch (stereoMode)
   {
-    case RENDER_STEREO_MODE_SPLIT_HORIZONTAL:
+    case RenderStereoMode::SPLIT_HORIZONTAL:
       m_destRect.y2 *= 2.0f;
       break;
-    case RENDER_STEREO_MODE_SPLIT_VERTICAL:
+    case RenderStereoMode::SPLIT_VERTICAL:
       m_destRect.x2 *= 2.0f;
       break;
     default:
@@ -159,7 +169,7 @@ void CRendererStarfish::ReleaseBuffer(int idx)
 CRenderInfo CRendererStarfish::GetRenderInfo()
 {
   CRenderInfo info;
-  info.max_buffer_size = 2;
+  info.max_buffer_size = 4;
   return info;
 }
 

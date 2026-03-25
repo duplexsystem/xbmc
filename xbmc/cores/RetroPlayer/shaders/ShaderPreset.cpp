@@ -24,7 +24,8 @@ using namespace KODI::SHADER;
 CShaderPreset::CShaderPreset(RETRO::CRenderContext& context,
                              unsigned videoWidth,
                              unsigned videoHeight)
-  : m_context(context), m_videoSize(videoWidth, videoHeight)
+  : m_context(context),
+    m_videoSize(videoWidth, videoHeight)
 {
 }
 
@@ -56,10 +57,9 @@ bool CShaderPreset::RenderUpdate(const RETRO::ViewportCoordinates& dest,
 
   PrepareParameters(dest, source);
 
-  const auto numPasses = static_cast<unsigned int>(m_pShaders.size());
-
   // Apply all passes except the last one (which needs to be applied to the backbuffer)
   IShaderTexture* sourceTexture = &source;
+  const auto numPasses = static_cast<unsigned int>(m_pShaders.size());
   for (unsigned shaderIdx = 0; shaderIdx + 1 < numPasses; ++shaderIdx)
   {
     IShader& shader = *m_pShaders[shaderIdx];
@@ -146,14 +146,12 @@ bool CShaderPreset::Update()
   {
     m_failedPaths.insert(m_presetPath);
     CLog::Log(LOGWARNING, "CShaderPreset::Update: {}", msg);
-    DisposeShaderTextures();
+    DisposeShaders();
     return false;
   };
 
   if (m_bPresetNeedsUpdate && !HasPathFailed(m_presetPath))
   {
-    DisposeShaderTextures();
-
     if (!CreateShaderTextures())
       return updateFailed("A shader texture failed to init");
   }
@@ -186,9 +184,8 @@ void CShaderPreset::UpdateMVPs()
 void CShaderPreset::PrepareParameters(const RETRO::ViewportCoordinates& dest,
                                       IShaderTexture& source)
 {
-  const auto numPasses = static_cast<unsigned int>(m_pShaders.size());
-
   // Prepare parameters for all shader passes
+  const auto numPasses = static_cast<unsigned int>(m_pShaders.size());
   for (unsigned int shaderIdx = 0; shaderIdx < numPasses; ++shaderIdx)
   {
     std::unique_ptr<IShader>& videoShader = m_pShaders[shaderIdx];
@@ -216,6 +213,7 @@ void CShaderPreset::CalculateScaledSize(const KODI::SHADER::ShaderPass& pass,
           pass.fbo.scaleX.scale != 0.0f ? pass.fbo.scaleX.scale * prevSize.x : prevSize.x;
       break;
   }
+
   switch (pass.fbo.scaleY.scaleType)
   {
     case ScaleType::ABSOLUTE_SCALE:
@@ -235,6 +233,8 @@ void CShaderPreset::CalculateScaledSize(const KODI::SHADER::ShaderPass& pass,
 
 void CShaderPreset::DisposeShaders()
 {
+  DisposeShaderTextures();
+
   m_pShaders.clear();
   m_passes.clear();
 }
@@ -242,7 +242,6 @@ void CShaderPreset::DisposeShaders()
 void CShaderPreset::DisposeShaderTextures()
 {
   m_pShaderTextures.clear();
-  m_bPresetNeedsUpdate = true;
 }
 
 bool CShaderPreset::HasPathFailed(const std::string& path) const
@@ -254,9 +253,10 @@ ShaderParameterMap CShaderPreset::GetShaderParameters(
     const std::vector<ShaderParameter>& parameters, const std::string& sourceStr) const
 {
   static const std::regex pragmaParamRegex("#pragma parameter ([a-zA-Z_][a-zA-Z0-9_]*)");
-  std::smatch matches;
 
   std::vector<std::string> validParams;
+  std::smatch matches;
+
   auto searchStart(sourceStr.cbegin());
   while (regex_search(searchStart, sourceStr.cend(), matches, pragmaParamRegex))
   {
@@ -283,5 +283,6 @@ ShaderParameterMap CShaderPreset::GetShaderParameters(
       }
     }
   }
+
   return matchParams;
 }

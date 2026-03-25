@@ -18,10 +18,13 @@
 #include "DVDOverlayContainer.h"
 #include "Interface/TimingConstants.h"
 #include "Process/ProcessInfo.h"
+#include "ServiceBroker.h"
 #include "VideoRenderers/RenderManager.h"
+#include "application/ApplicationVolumeHandling.h"
 #include "cores/AudioEngine/Encoders/AEEncoderFFmpeg.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h"
 #include "cores/AudioEngine/Interfaces/AE.h"
+#include "cores/AudioEngine/Utils/AEStreamInfo.h"
 #include "cores/AudioEngine/Utils/AEUtil.h"
 #include "cores/VideoPlayer/Interface/DemuxCrypto.h"
 #include "settings/SettingUtils.h"
@@ -30,11 +33,14 @@
 #include "settings/lib/Setting.h"
 #include "utils/Base64.h"
 #include "utils/BitstreamConverter.h"
+#include "utils/ComponentContainer.h"
 #include "utils/JSONVariantParser.h"
 #include "utils/JSONVariantWriter.h"
 #include "utils/SystemInfo.h"
 #include "utils/log.h"
 #include "windowing/wayland/WinSystemWaylandWebOS.h"
+
+#include "platform/linux/WebOSTVPlatformConfig.h"
 
 #include <algorithm>
 #include <cmath>
@@ -63,6 +69,7 @@ using namespace std::chrono_literals;
 namespace
 {
 constexpr unsigned int AC3_MAX_SYNC_FRAME_SIZE = 3840;
+constexpr unsigned int EAC3_MAX_SYNC_FRAME_SIZE = 6144;
 constexpr int RESAMPLED_STREAM_ID = -1000;
 constexpr unsigned int MIN_AUDIO_RESAMPLE_BUFFER_SIZE = 4096;
 
@@ -78,44 +85,25 @@ constexpr unsigned int MAX_SRC_BUFFER_LEVEL_VIDEO = 8 * 1024 * 1024; // 8 MB
 constexpr unsigned int SVP_VERSION_30 = 30;
 constexpr unsigned int SVP_VERSION_40 = 40;
 
-constexpr auto LUNA_GET_CONFIG = "luna://com.webos.service.config/getConfigs";
-
-struct CodecEntry
-{
-  std::string_view name;
-  bool isSecure{false};
-};
-
-std::map<AVCodecID, CodecEntry> ms_codecMap = {
-    {AV_CODEC_ID_VP8, {"VP8"}},       {AV_CODEC_ID_VP9, {"VP9"}},
-    {AV_CODEC_ID_AVS, {"H264"}},      {AV_CODEC_ID_CAVS, {"H264"}},
-    {AV_CODEC_ID_H264, {"H264"}},     {AV_CODEC_ID_HEVC, {"H265"}},
-    {AV_CODEC_ID_AV1, {"AV1"}},       {AV_CODEC_ID_AC3, {"AC3"}},
-    {AV_CODEC_ID_EAC3, {"AC3 PLUS"}}, {AV_CODEC_ID_AC4, {"AC4"}},
-    {AV_CODEC_ID_OPUS, {"OPUS"}},     {AV_CODEC_ID_MP3, {"MP3"}},
-    {AV_CODEC_ID_AAC, {"AAC", true}}, {AV_CODEC_ID_AAC_LATM, {"AAC", true}}};
+auto ms_codecMap = std::map<AVCodecID, std::string_view>({{AV_CODEC_ID_VP8, "VP8"},
+                                                          {AV_CODEC_ID_VP9, "VP9"},
+                                                          {AV_CODEC_ID_AVS, "H264"},
+                                                          {AV_CODEC_ID_CAVS, "H264"},
+                                                          {AV_CODEC_ID_H264, "H264"},
+                                                          {AV_CODEC_ID_HEVC, "H265"},
+                                                          {AV_CODEC_ID_AV1, "AV1"},
+                                                          {AV_CODEC_ID_AC3, "AC3"},
+                                                          {AV_CODEC_ID_EAC3, "AC3 PLUS"},
+                                                          {AV_CODEC_ID_AC4, "AC4"},
+                                                          {AV_CODEC_ID_OPUS, "OPUS"},
+                                                          {AV_CODEC_ID_MP3, "MP3"},
+                                                          {AV_CODEC_ID_AAC, "AAC"},
+                                                          {AV_CODEC_ID_AAC_LATM, "AAC"}});
 
 const auto ms_hdrInfoMap = std::map<AVColorTransferCharacteristic, std::string_view>({
     {AVCOL_TRC_SMPTE2084, "HDR10"},
     {AVCOL_TRC_ARIB_STD_B67, "HLG"},
 });
-
-int GetWebOSVersion()
-{
-  const std::string version = CSysInfo::GetOsVersion();
-  int majorVersion = 0;
-  try
-  {
-    const size_t pos = version.find('.');
-    const std::string majorStr = (pos != std::string::npos) ? version.substr(0, pos) : version;
-    majorVersion = std::stoi(majorStr);
-  }
-  catch (const std::exception& e)
-  {
-    CLog::LogF(LOGERROR, "Failed to parse WebOS version '{}': {}", version, e.what());
-  }
-  return majorVersion;
-}
 
 unsigned int SelectTranscodingSampleRate(const unsigned int sampleRate)
 {
@@ -135,42 +123,45 @@ unsigned int SelectTranscodingSampleRate(const unsigned int sampleRate)
   }
 }
 
-void CheckDTSAvailability()
+unsigned int ParseAACSampleRate(const uint8_t* data, const size_t size)
 {
-  static std::promise<void> promise;
-  static std::once_flag onceFlag;
-  static std::shared_future<void> future = promise.get_future().share();
+  if (size < 2)
+    return 0;
 
-  std::call_once(onceFlag,
-                 []
-                 {
-                   CVariant request;
-                   request["configNames"] = std::vector<std::string>{"tv.model.edidType"};
-                   std::string payload;
-                   CJSONVariantWriter::Write(request, payload, true);
+  // see ff_mpeg4audio_sample_rates
+  static const unsigned int sampleRates[16] = {96000, 88200, 64000, 48000, 44100, 32000,
+                                               24000, 22050, 16000, 12000, 11025, 8000,
+                                               7350,  0,     0,     0};
 
-                   HContext requestContext;
-                   requestContext.pub = true;
-                   requestContext.multiple = false;
-                   requestContext.callback = [](LSHandle* sh, LSMessage* msg, void* ctx)
-                   {
-                     CVariant config;
-                     CJSONVariantParser::Parse(HLunaServiceMessage(msg), config);
-                     if (config["configs"]["tv.model.edidType"].asString().find("dts") !=
-                         std::string::npos)
-                       ms_codecMap.emplace(AV_CODEC_ID_DTS, "DTS");
-                     promise.set_value();
+  constexpr unsigned int AAC_AOT_AAC_LC = 2;
+  constexpr unsigned int AAC_AOT_SBR = 5;
+  constexpr unsigned int AAC_AOT_PS = 29;
+  constexpr size_t MIN_SIZE_FOR_SBR = 5;
+  constexpr unsigned int MAX_SAMPLE_INDEX = 15;
 
-                     return false;
-                   };
-                   if (HLunaServiceCall(LUNA_GET_CONFIG, payload.c_str(), &requestContext))
-                   {
-                     CLog::LogF(LOGERROR, "Luna request call failed - Assuming no DTS support");
-                     promise.set_value();
-                   }
-                 });
+  // Read the Audio Object Type (AOT)
+  const unsigned int aot = (data[0] >> 3) & 0x1F;
 
-  future.wait();
+  // Read the sampling_frequency_index
+  const unsigned int srIndex = ((data[0] & 0x07) << 1) | (data[1] >> 7);
+  unsigned int sampleRate = (srIndex <= MAX_SAMPLE_INDEX) ? sampleRates[srIndex] : 0;
+
+  // HE-AAC / HE-AACv2 (PS) check
+  if ((aot == AAC_AOT_AAC_LC || aot == AAC_AOT_SBR || aot == AAC_AOT_PS) &&
+      size >= MIN_SIZE_FOR_SBR)
+  {
+    // Check if SBR or PS extension is present
+    const unsigned int extAot = (data[2] >> 3) & 0x1F;
+    if (extAot == AAC_AOT_SBR || extAot == AAC_AOT_PS)
+    {
+      // Read the extension sampling frequency index
+      const unsigned int extSrIndex = ((data[2] & 0x07) << 1) | (data[3] >> 7);
+      if (extSrIndex <= MAX_SAMPLE_INDEX)
+        sampleRate = sampleRates[extSrIndex]; // effective HE-AAC / HE-AACv2 rate
+    }
+  }
+
+  return sampleRate;
 }
 } // namespace
 
@@ -201,8 +192,9 @@ CMediaPipelineWebOS::CMediaPipelineWebOS(CProcessInfo& processInfo,
   m_picture.Reset();
   m_picture.videoBuffer = new CStarfishVideoBuffer();
 
-  m_webOSVersion = GetWebOSVersion();
-  CheckDTSAvailability();
+  m_webOSVersion = WebOSTVPlatformConfig::GetWebOSVersion();
+  if (WebOSTVPlatformConfig::SupportsDTS())
+    ms_codecMap.emplace(AV_CODEC_ID_DTS, "DTS");
   m_processInfo.GetVideoBufferManager().ReleasePools();
 }
 
@@ -224,8 +216,16 @@ void CMediaPipelineWebOS::UpdateAudioInfo()
   const double kbps = m_audioStats.GetBitrate() / 1024.0;
 
   std::scoped_lock lock(m_audioInfoMutex);
-  m_audioInfo = fmt::format("aq:{:02}% {:.3f}s {:.3f}Kb, Kb/s:{:.2f}{}", level, ts, kb, kbps,
-                            m_audioEncoder ? ", transcoded ac3" : "");
+
+  std::string transcodedInfo;
+  if (m_audioEncoder)
+  {
+    transcodedInfo = fmt::format(
+        ", transcoded {}", (m_audioEncoder->GetCodecID() == AV_CODEC_ID_EAC3) ? "eac3" : "ac3");
+  }
+
+  m_audioInfo =
+      fmt::format("aq:{:02}% {:.3f}s {:.3f}Kb, Kb/s:{:.2f}{}", level, ts, kb, kbps, transcodedInfo);
 }
 
 void CMediaPipelineWebOS::UpdateVideoInfo()
@@ -271,16 +271,12 @@ std::string CMediaPipelineWebOS::GetVideoInfo()
   return m_videoInfo;
 }
 
-bool CMediaPipelineWebOS::Supports(const AVCodecID codec,
-                                   const int profile,
-                                   const bool includeSecure)
+bool CMediaPipelineWebOS::Supports(const AVCodecID codec, const int profile)
 {
   if ((codec == AV_CODEC_ID_H264 || codec == AV_CODEC_ID_AVS || codec == AV_CODEC_ID_CAVS) &&
       profile == AV_PROFILE_H264_HIGH_10)
     return false;
-  if (const auto it = ms_codecMap.find(codec); it != ms_codecMap.end())
-    return includeSecure || !it->second.isSecure;
-  return false;
+  return ms_codecMap.contains(codec);
 }
 
 void CMediaPipelineWebOS::AcbCallback(
@@ -313,6 +309,9 @@ bool CMediaPipelineWebOS::OpenAudioStream(CDVDStreamInfo& audioHint)
       CVariant optInfo = CVariant::VariantTypeObject;
       const std::string codecName = SetupAudio(audioHint, optInfo);
 
+      if (codecName.empty())
+        return false;
+
       std::string output;
       CJSONVariantWriter::Write(optInfo, output, true);
       CLog::LogF(LOGDEBUG, "changeAudioCodec: {}", output);
@@ -323,18 +322,23 @@ bool CMediaPipelineWebOS::OpenAudioStream(CDVDStreamInfo& audioHint)
       m_processInfo.SetAudioChannels(CAEUtil::GetAEChannelLayout(audioHint.channellayout));
       m_processInfo.SetAudioSampleRate(audioHint.samplerate);
       m_processInfo.SetAudioBitsPerSample(audioHint.bitspersample);
-      if (Supports(audioHint.codec, audioHint.cryptoSession != nullptr))
+      if (Supports(audioHint.codec, audioHint.profile))
         m_processInfo.SetAudioDecoderName("starfish-" +
-                                          std::string(ms_codecMap.at(audioHint.codec).name));
+                                          std::string(ms_codecMap.at(audioHint.codec).data()));
       else if (m_audioEncoder)
-        m_processInfo.SetAudioDecoderName("starfish-AC3 (transcoding)");
-
+      {
+        m_processInfo.SetAudioDecoderName((m_audioEncoder->GetCodecID() == AV_CODEC_ID_EAC3)
+                                              ? "starfish-EAC3 (transcoding)"
+                                              : "starfish-AC3 (transcoding)");
+      }
+      m_audioClosed = false;
       return true;
     }
     // API introduced in webOS 6.0, so we need to handle older versions differently
     Unload(true);
 
     m_mediaAPIs = std::make_unique<StarfishMediaAPIs>();
+    m_audioClosed = false;
   }
 
   if (m_audioHint.codec && m_videoHint.codec)
@@ -352,6 +356,7 @@ bool CMediaPipelineWebOS::OpenVideoStream(CDVDStreamInfo hint)
 
   if (m_loaded)
   {
+    m_videoClosed = false;
     if (m_videoHint.codec == hint.codec && m_videoHint.hdrType == hint.hdrType)
     {
       std::scoped_lock lock(m_videoCriticalSection);
@@ -387,12 +392,28 @@ bool CMediaPipelineWebOS::OpenVideoStream(CDVDStreamInfo hint)
   return true;
 }
 
-void CMediaPipelineWebOS::CloseAudioStream(bool waitForBuffers)
+void CMediaPipelineWebOS::CloseAudioStream(const bool waitForBuffers)
 {
+  m_audioClosed = true;
+  if (m_videoClosed && m_audioClosed)
+  {
+    Unload(waitForBuffers);
+    m_audioHint = CDVDStreamInfo();
+    m_videoHint = CDVDStreamInfo();
+    m_mediaAPIs = std::make_unique<StarfishMediaAPIs>();
+  }
 }
 
-void CMediaPipelineWebOS::CloseVideoStream(bool waitForBuffers)
+void CMediaPipelineWebOS::CloseVideoStream(const bool waitForBuffers)
 {
+  m_videoClosed = true;
+  if (m_videoClosed && m_audioClosed)
+  {
+    Unload(waitForBuffers);
+    m_audioHint = CDVDStreamInfo();
+    m_videoHint = CDVDStreamInfo();
+    m_mediaAPIs = std::make_unique<StarfishMediaAPIs>();
+  }
 }
 
 void CMediaPipelineWebOS::Flush(bool sync)
@@ -401,6 +422,7 @@ void CMediaPipelineWebOS::Flush(bool sync)
     CLog::LogF(LOGDEBUG, "Failed to flush media APIs");
   FlushAudioMessages();
   FlushVideoMessages();
+  std::scoped_lock lock(m_videoCriticalSection);
   if (m_bitstream)
     m_bitstream->ResetStartDecode();
   m_flushed = true;
@@ -614,7 +636,7 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
   }
 
   p["option"]["appId"] = CCompileInfo::GetPackage();
-  contents["codec"]["video"] = std::string(ms_codecMap.at(videoHint.codec).name);
+  contents["codec"]["video"] = ms_codecMap.at(videoHint.codec).data();
 
   if (audioHint.codec == AV_CODEC_ID_NONE)
   {
@@ -626,7 +648,11 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
   }
   else
   {
-    contents["codec"]["audio"] = SetupAudio(audioHint, contents);
+    const std::string audioCodec = SetupAudio(audioHint, contents);
+    if (audioCodec.empty())
+      return false;
+
+    contents["codec"]["audio"] = audioCodec;
   }
 
   if (audioHint.codec == AV_CODEC_ID_EAC3 && audioHint.profile == AV_PROFILE_EAC3_DDP_ATMOS)
@@ -669,8 +695,8 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
   int32_t maxWidth = 0;
   int32_t maxHeight = 0;
   int32_t maxFramerate = 0;
-  smp::util::getMaxVideoResolution(ms_codecMap.at(videoHint.codec).name.data(), &maxWidth,
-                                   &maxHeight, &maxFramerate);
+  smp::util::getMaxVideoResolution(ms_codecMap.at(videoHint.codec).data(), &maxWidth, &maxHeight,
+                                   &maxFramerate);
   p["option"]["adaptiveStreaming"]["adaptiveResolution"] = true;
   p["option"]["adaptiveStreaming"]["maxWidth"] = maxWidth;
   p["option"]["adaptiveStreaming"]["maxHeight"] = maxHeight;
@@ -707,6 +733,19 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
   m_picture.iDisplayWidth = videoHint.width;
   m_picture.iDisplayHeight = videoHint.height;
   m_picture.stereoMode = videoHint.stereo_mode;
+  m_picture.hdrType = videoHint.hdrType;
+  m_picture.color_transfer = videoHint.colorTransferCharacteristic;
+
+  // apply forced aspect
+  if (videoHint.forced_aspect && videoHint.aspect > 0.0)
+  {
+    m_picture.iDisplayWidth = std::lround(m_picture.iDisplayHeight * videoHint.aspect);
+    if (m_picture.iDisplayWidth > m_picture.iWidth)
+    {
+      m_picture.iDisplayWidth = m_picture.iWidth;
+      m_picture.iDisplayHeight = std::lround(m_picture.iDisplayWidth / videoHint.aspect);
+    }
+  }
 
   const int sorient = m_processInfo.GetVideoSettings().m_Orientation;
   const int orientation =
@@ -730,7 +769,7 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
   m_droppedFrames = 0;
   std::string formatName = fmt::format(
       "starfish-{}{}", videoHint.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION ? "d" : "",
-      StringUtils::ToLower(ms_codecMap.at(videoHint.codec).name.data()));
+      StringUtils::ToLower(ms_codecMap.at(videoHint.codec)));
   m_processInfo.SetVideoDecoderName(formatName, true);
   m_processInfo.SetVideoPixelFormat("Surface");
   m_processInfo.SetVideoDimensions(videoHint.width, videoHint.height);
@@ -746,13 +785,20 @@ bool CMediaPipelineWebOS::Load(CDVDStreamInfo videoHint, CDVDStreamInfo audioHin
       m_processInfo.SetAudioChannels(CAEUtil::GuessChLayout(audioHint.channels));
     m_processInfo.SetAudioSampleRate(audioHint.samplerate);
     m_processInfo.SetAudioBitsPerSample(audioHint.bitspersample);
-    if (Supports(audioHint.codec, audioHint.cryptoSession != nullptr))
+    if (Supports(audioHint.codec, audioHint.profile))
       m_processInfo.SetAudioDecoderName(std::string("starfish-") +
-                                        std::string(ms_codecMap.at(audioHint.codec).name));
+                                        ms_codecMap.at(audioHint.codec).data());
     else if (m_audioEncoder)
-      m_processInfo.SetAudioDecoderName("starfish-AC3 (transcoding)");
+    {
+      m_processInfo.SetAudioDecoderName((m_audioEncoder->GetCodecID() == AV_CODEC_ID_EAC3)
+                                            ? "starfish-EAC3 (transcoding)"
+                                            : "starfish-AC3 (transcoding)");
+    }
   }
 
+  m_videoClosed = false;
+  if (m_hasAudio)
+    m_audioClosed = false;
   m_renderManager.ShowVideo(true);
   return true;
 }
@@ -787,26 +833,50 @@ std::string CMediaPipelineWebOS::SetupAudio(CDVDStreamInfo& audioHint, CVariant&
   m_audioResample = nullptr;
   m_encoderBuffers = nullptr;
 
+  auto setAC3PlusInfo = [&](const CDVDStreamInfo& hint, CVariant& optInfo)
+  {
+    optInfo["ac3PlusInfo"]["channels"] = hint.channels;
+    optInfo["ac3PlusInfo"]["frequency"] = hint.samplerate / 1000.0;
+    if (hint.profile == AV_PROFILE_EAC3_DDP_ATMOS)
+      optInfo["ac3PlusInfo"]["channels"] = hint.channels + 2;
+  };
+
   std::string codecName = "AC3";
-  if (!Supports(audioHint.codec, audioHint.cryptoSession != nullptr))
+  const bool allowPassthrough = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+                                    CSettings::SETTING_AUDIOOUTPUT_PASSTHROUGH) ||
+                                audioHint.cryptoSession;
+  const bool supported = Supports(audioHint.codec, audioHint.profile);
+
+  if (!supported && audioHint.cryptoSession)
+  {
+    CLog::LogF(LOGERROR, "Cannot transcode encrypted audio stream");
+    return "";
+  }
+
+  if (!supported || !allowPassthrough)
   {
     m_audioCodec = std::make_unique<CDVDAudioCodecFFmpeg>(m_processInfo);
-    CDVDCodecOptions options;
-    m_audioCodec->Open(audioHint, options);
+    if (CDVDCodecOptions options; !m_audioCodec->Open(audioHint, options))
+    {
+      CLog::LogF(LOGERROR, "Failed to open audio codec for transcoding");
+      m_audioCodec = nullptr;
+      return "";
+    }
     m_audioEncoder = std::make_unique<CAEEncoderFFmpeg>();
+
+    if (WebOSTVPlatformConfig::SupportsEAC3())
+    {
+      codecName = "AC3 PLUS";
+      setAC3PlusInfo(audioHint, optInfo);
+    }
+
     return codecName;
   }
 
-  codecName = ms_codecMap.at(audioHint.codec).name;
+  codecName = ms_codecMap.at(audioHint.codec);
   if (audioHint.codec == AV_CODEC_ID_EAC3)
   {
-    optInfo["ac3PlusInfo"]["channels"] = audioHint.channels;
-    optInfo["ac3PlusInfo"]["frequency"] = audioHint.samplerate / 1000.0;
-
-    if (audioHint.profile == AV_PROFILE_EAC3_DDP_ATMOS)
-    {
-      optInfo["ac3PlusInfo"]["channels"] = audioHint.channels + 2;
-    }
+    setAC3PlusInfo(audioHint, optInfo);
   }
   if (audioHint.codec == AV_CODEC_ID_AC4)
   {
@@ -835,10 +905,24 @@ std::string CMediaPipelineWebOS::SetupAudio(CDVDStreamInfo& audioHint, CVariant&
   else if (audioHint.codec == AV_CODEC_ID_AAC || audioHint.codec == AV_CODEC_ID_AAC_LATM)
   {
     optInfo["aacInfo"]["channels"] = audioHint.channels;
+    optInfo["aacInfo"]["profile"] = audioHint.profile + 1;
+    optInfo["aacInfo"]["format"] = audioHint.extradata ? "raw" : "adts";
+
+    const uint8_t* data = audioHint.extradata.GetData();
+    const size_t size = audioHint.extradata.GetSize();
+
+    if (data && size > 0)
+    {
+      // ParseAACSampleRate is used to determine the actual sample rate from extradata
+      // cannot use avpriv_mpeg4audio_get_config2 as not exposed in FFmpeg public API
+      unsigned int parsedRate = ParseAACSampleRate(data, size);
+      if (parsedRate > 0)
+        audioHint.samplerate = parsedRate;
+    }
+
     optInfo["aacInfo"]["frequency"] = audioHint.samplerate / 1000.0;
-    optInfo["aacInfo"]["profile"] = audioHint.profile;
-    optInfo["aacInfo"]["format"] = audioHint.extradata ? "MP4" : "adts";
   }
+
   return codecName;
 }
 
@@ -847,6 +931,7 @@ void CMediaPipelineWebOS::SetupBitstreamConverter(CDVDStreamInfo& hint)
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   const bool convertDovi =
       hint.dovi.el_present_flag || settings->GetBool(CSettings::SETTING_VIDEOPLAYER_CONVERTDOVI);
+  const bool doviZeroLevel5 = settings->GetBool(CSettings::SETTING_VIDEOPLAYER_DOVIZEROLEVEL5);
 
   const std::shared_ptr allowedHdrFormatsSetting(std::dynamic_pointer_cast<CSettingList>(
       settings->GetSetting(CSettings::SETTING_VIDEOPLAYER_ALLOWEDHDRFORMATS)));
@@ -865,6 +950,7 @@ void CMediaPipelineWebOS::SetupBitstreamConverter(CDVDStreamInfo& hint)
         if (hint.codec == AV_CODEC_ID_HEVC)
         {
           m_bitstream->SetRemoveDovi(removeDovi);
+          m_bitstream->SetDoviZeroLevel5(doviZeroLevel5);
 
           // webOS doesn't support HDR10+ and it can cause issues
           m_bitstream->SetRemoveHdr10Plus(true);
@@ -1232,17 +1318,23 @@ unsigned int CMediaPipelineWebOS::GetQueueLevel(const StreamType type) const
   return std::min(99L, std::lround(100.0 * bytes / capacity));
 }
 
+void CMediaPipelineWebOS::SetDynamicRangeCompression(const long drc)
+{
+  m_audioLimiter.SetAmplification(std::pow(10.0f, static_cast<float>(drc) / 2000.0f));
+}
+
 void CMediaPipelineWebOS::Process()
 {
   while (!m_bStop)
   {
-    std::scoped_lock videoLock(m_videoCriticalSection);
     std::shared_ptr<CDVDMsg> msg = nullptr;
     int priority = 0;
     m_messageQueueVideo.Get(msg, 10ms, priority);
 
     if (msg)
     {
+      std::scoped_lock videoLock(m_videoCriticalSection);
+
       if (msg->IsType(CDVDMsg::DEMUXER_PACKET))
       {
         FeedVideoData(msg);
@@ -1273,12 +1365,13 @@ void CMediaPipelineWebOS::ProcessAudio()
   m_audioStats.Start();
   while (!m_bStop)
   {
-    std::scoped_lock lock(m_audioCriticalSection);
     std::shared_ptr<CDVDMsg> msg = nullptr;
     int priority = 0;
     m_messageQueueAudio.Get(msg, 10ms, priority);
     if (msg)
     {
+      std::scoped_lock lock(m_audioCriticalSection);
+
       if (msg->IsType(CDVDMsg::DEMUXER_PACKET))
       {
         const DemuxPacket* packet =
@@ -1297,6 +1390,9 @@ void CMediaPipelineWebOS::ProcessAudio()
               AEAudioFormat dstFormat = m_audioCodec->GetFormat();
               dstFormat.m_sampleRate = SelectTranscodingSampleRate(dstFormat.m_sampleRate);
               dstFormat.m_dataFormat = AE_FMT_FLOATP;
+              dstFormat.m_streamInfo.m_type = WebOSTVPlatformConfig::SupportsEAC3()
+                                                  ? CAEStreamInfo::DataType::STREAM_TYPE_EAC3
+                                                  : CAEStreamInfo::DataType::STREAM_TYPE_AC3;
               m_audioEncoder->Initialize(dstFormat, true);
               const std::shared_ptr<CSettings> settings =
                   CServiceBroker::GetSettingsComponent()->GetSettings();
@@ -1304,6 +1400,7 @@ void CMediaPipelineWebOS::ProcessAudio()
                   settings->GetInt(CSettings::SETTING_AUDIOOUTPUT_PROCESSQUALITY));
               m_audioResample = std::make_unique<ActiveAE::CActiveAEBufferPoolResample>(
                   m_audioCodec->GetFormat(), dstFormat, quality);
+              m_audioLimiter.SetSamplerate(dstFormat.m_sampleRate);
               const double sublevel =
                   settings->GetNumber(CSettings::SETTING_AUDIOOUTPUT_MIXSUBLEVEL) / 100.0;
               m_audioResample->Create(
@@ -1318,6 +1415,9 @@ void CMediaPipelineWebOS::ProcessAudio()
               m_encoderBuffers->Create(0);
 
               // Update process info with audio details
+              m_processInfo.SetAudioDecoderName((m_audioEncoder->GetCodecID() == AV_CODEC_ID_EAC3)
+                                                    ? "starfish-EAC3 (transcoding)"
+                                                    : "starfish-AC3 (transcoding)");
               m_processInfo.SetAudioChannels(frame.format.m_channelLayout);
               m_processInfo.SetAudioSampleRate(frame.format.m_sampleRate);
               m_processInfo.SetAudioBitsPerSample(frame.bits_per_sample);
@@ -1336,6 +1436,13 @@ void CMediaPipelineWebOS::ProcessAudio()
             }
 
             ActiveAE::CSampleBuffer* buffer = m_encoderBuffers->GetFreeBuffer();
+
+            const double centerMixLevel = frame.hasDownmix ? frame.centerMixLevel : M_SQRT1_2;
+            const double curDB = 20.0 * std::log10(centerMixLevel);
+            frame.centerMixLevel =
+                std::pow(10.0, (curDB + m_processInfo.GetVideoSettings().m_CenterMixLevel) / 20.0);
+            frame.hasDownmix = true;
+            buffer->centerMixLevel = frame.centerMixLevel;
             buffer->timestamp = static_cast<int64_t>(frame.pts);
             buffer->pkt->nb_samples = static_cast<int>(frame.nb_frames);
 
@@ -1351,10 +1458,36 @@ void CMediaPipelineWebOS::ProcessAudio()
             {
               for (const auto& buf : m_audioResample->m_outputSamples)
               {
+                const unsigned int maxSize = (m_audioEncoder->GetCodecID() == AV_CODEC_ID_EAC3)
+                                                 ? EAC3_MAX_SYNC_FRAME_SIZE
+                                                 : AC3_MAX_SYNC_FRAME_SIZE;
                 auto p = std::make_shared<CDVDMsgDemuxerPacket>(
-                    CDVDDemuxUtils::AllocateDemuxPacket(AC3_MAX_SYNC_FRAME_SIZE));
+                    CDVDDemuxUtils::AllocateDemuxPacket(maxSize));
+
+                const bool passthrough =
+                    CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+                        CSettings::SETTING_AUDIOOUTPUT_PASSTHROUGH);
+                if (!passthrough && buf->pkt->config.fmt == AV_SAMPLE_FMT_FLTP)
+                {
+                  float volume = CServiceBroker::GetAppComponents()
+                                     .GetComponent<CApplicationVolumeHandling>()
+                                     ->GetVolumePercent() /
+                                 100.0f;
+                  volume *= m_audioLimiter.Run(reinterpret_cast<float**>(buf->pkt->data),
+                                               buf->pkt->config.channels, 0, buf->pkt->planes > 1);
+
+                  for (std::size_t j = 0; j < static_cast<std::size_t>(buf->pkt->planes); ++j)
+                  {
+                    const std::size_t numSamples = static_cast<std::size_t>(buf->pkt->nb_samples) *
+                                                   buf->pkt->config.channels /
+                                                   static_cast<std::size_t>(buf->pkt->planes);
+                    std::span samples{reinterpret_cast<float*>(buf->pkt->data[j]), numSamples};
+                    std::ranges::for_each(samples, [volume](float& s) { s *= volume; });
+                  }
+                }
+
                 p->m_packet->pts = static_cast<double>(buf->timestamp);
-                p->m_packet->iSize = AC3_MAX_SYNC_FRAME_SIZE;
+                p->m_packet->iSize = maxSize;
                 p->m_packet->iStreamId = RESAMPLED_STREAM_ID;
                 p->m_packet->iSize =
                     m_audioEncoder->Encode(buf->pkt->data[0], buf->pkt->planes * buf->pkt->linesize,

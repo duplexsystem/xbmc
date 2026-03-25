@@ -9,8 +9,10 @@
 #include "WeatherPropertyHelper.h"
 
 #include "LangInfo.h"
+#include "ServiceBroker.h"
 #include "guilib/GUIWindow.h"
-#include "guilib/LocalizeStrings.h"
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "utils/Map.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
@@ -73,7 +75,7 @@ enum class LocalizationType
 
 struct PropertyDetails
 {
-  using FormatterPtr = std::add_pointer<std::string(const std::string&)>::type;
+  using FormatterPtr = std::add_pointer_t<std::string(const std::string&)>;
   FormatterPtr formatter;
   LocalizationType l10n{LocalizationType::NONE};
 };
@@ -117,7 +119,7 @@ CWeatherPropertyHelper::Property CWeatherPropertyHelper::GetProperty(const std::
     // match via last token?
     const size_t pos{prop.find_last_of('.')};
     if (pos != std::string::npos && pos < (prop.size() - 1))
-      it = propertyDetails.find(prop.substr(pos + 1));
+      it = propertyDetails.find(std::string_view(prop).substr(pos + 1));
   }
 
   if (it != propertyDetails.cend())
@@ -176,7 +178,7 @@ std::string CWeatherPropertyHelper::FormatWind(const std::string& direction, con
 {
   if (direction == "CALM")
   {
-    return g_localizeStrings.Get(1410); // Calm
+    return CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(1410); // Calm
   }
   else
   {
@@ -190,7 +192,8 @@ std::string CWeatherPropertyHelper::FormatWind(const std::string& direction, con
     }
     else
     {
-      return StringUtils::Format(g_localizeStrings.Get(434), // From {direction} at {speed} {unit}
+      return StringUtils::Format(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(
+                                     434), // From {direction} at {speed} {unit}
                                  direction, static_cast<int>(speed.To(g_langInfo.GetSpeedUnit())),
                                  g_langInfo.GetSpeedUnitString());
     }

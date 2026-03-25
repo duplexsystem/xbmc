@@ -1,7 +1,6 @@
 -include ../../Makefile.include
 include SPDLOG-VERSION
-DEPS = Makefile SPDLOG-VERSION ../../download-files.include \
-                                001-windows-pdb-symbol-gen.patch
+DEPS = Makefile SPDLOG-VERSION ../../download-files.include
 
 CMAKE_OPTIONS= \
 	-DSPDLOG_BUILD_EXAMPLE=OFF \
@@ -18,7 +17,7 @@ else
   ifeq ($(PLATFORM),)
     PLATFORM = native
     TARBALLS_LOCATION = $(ROOT_DIR)
-    BASE_URL ?= http://mirrors.kodi.tv/build-deps/sources
+    BASE_URL ?= https://mirrors.kodi.tv/build-deps/sources
     RETRIEVE_TOOL := curl
     RETRIEVE_TOOL_FLAGS := -LsS --create-dirs --retry 10 --retry-connrefused -o
     ARCHIVE_TOOL := tar
@@ -45,7 +44,6 @@ ifeq ($(PREFIX),)
 endif
 	rm -rf $(PLATFORM); mkdir -p $(PLATFORM)/build
 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
-	cd $(PLATFORM); patch -p1 -i ../001-windows-pdb-symbol-gen.patch
 	cd $(PLATFORM)/build; $(CMAKE) $(CMAKE_OPTIONS) ..
 
 $(LIBDYLIB): $(PLATFORM)

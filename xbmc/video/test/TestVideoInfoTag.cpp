@@ -71,3 +71,103 @@ TEST(TestVideoInfoTag, SaveTVShowSeasons)
 
   EXPECT_EQ(result, referenceXml);
 }
+
+TEST(TestVideoInfoTag, SetUniqueIDs)
+{
+  // initial state: no default, empty list.
+  CVideoInfoTag details;
+  std::map<std::string, std::string, std::less<>> reference = {};
+
+  EXPECT_EQ(details.GetDefaultUniqueID(), "unknown");
+  EXPECT_EQ(details.GetUniqueIDs(), reference);
+
+  // usual flow: initialize from initial state with a list.
+  // entries with blank type or uniqueid are ignored
+  std::map<std::string, std::string, std::less<>> test = {
+      {"imdb", "tt4577466"}, {"tmdb", "64043"}, {"tvdb", "299350"}, {"", "123456"}, {"foo", ""}};
+  reference = {{"imdb", "tt4577466"}, {"tmdb", "64043"}, {"tvdb", "299350"}};
+
+  details.SetUniqueIDs(test);
+  details.SetUniqueID("64043", "tmdb", true);
+
+  EXPECT_EQ(details.GetDefaultUniqueID(), "tmdb");
+  EXPECT_EQ(details.GetUniqueIDs(), reference);
+
+  // current update behavior, not sure why:
+  // the former default type and value from the previous list of uniqueids are added back when
+  // omitted from the new list - instead of reverting to "unknown" default and setting the list as provided.
+  test = {{"imdb", "tt4577466"}, {"tvdb", "299350"}};
+  details.SetUniqueIDs(test);
+
+  EXPECT_EQ(details.GetDefaultUniqueID(), "tmdb");
+  EXPECT_EQ(details.GetUniqueIDs(), reference);
+
+  // setting a blank list clears all except the previous default
+  test = {};
+  reference = {{"tmdb", "64043"}};
+  details.SetUniqueIDs(test);
+
+  EXPECT_EQ(details.GetDefaultUniqueID(), "tmdb");
+  EXPECT_EQ(details.GetUniqueIDs(), reference);
+
+  // except when there is no explicit default, then setting a blank list clears the list.
+  CVideoInfoTag details2;
+  details2.SetUniqueIDs(reference);
+  details2.SetUniqueIDs(test);
+
+  EXPECT_EQ(details2.GetDefaultUniqueID(), "unknown");
+  EXPECT_EQ(details2.GetUniqueIDs(), test);
+}
+
+struct TestOriginalLanguage
+{
+  std::string input;
+  std::string expected;
+  CVideoInfoTag::LanguageTagSource source = CVideoInfoTag::LanguageTagSource::SOURCE_EXTERNAL;
+  bool status = true;
+};
+
+std::ostream& operator<<(std::ostream& os, const TestOriginalLanguage& rhs)
+{
+  return os << rhs.input;
+}
+
+// clang-format off
+const TestOriginalLanguage OriginalLanguageTests[] = {
+    {"en", "en", CVideoInfoTag::LanguageTagSource::SOURCE_INTERNAL},
+    {"foobarbaz", "foobarbaz", CVideoInfoTag::LanguageTagSource::SOURCE_INTERNAL},
+    {"en", "en"}, // ISO 639-1
+    {"eng", "en"}, // ISO 639-2
+    {"fra", "fr"}, // ISO 639-2/T
+    {"fre", "fr"}, // ISO 639-2/B
+    {"en-US", "en-US"}, // BCP 47 lang-region
+    {"zh-guoyu", "zh-guoyu"}, // Grandfathered BCP 47
+    // Future: expected to be rewritten to the preferred language defined in the registry
+    // Other tests for canonicalization will be needed as well
+    {"english", "en"}, // English name
+    {"foobarbaz", "", CVideoInfoTag::LanguageTagSource::SOURCE_EXTERNAL, false}, // Unknown English name
+};
+// clang-format on
+
+class OriginalLanguageTester : public testing::Test,
+                               public testing::WithParamInterface<TestOriginalLanguage>
+{
+};
+
+TEST_P(OriginalLanguageTester, SetOriginalLanguage)
+{
+  auto& param = GetParam();
+
+  CVideoInfoTag tag;
+  bool status = tag.SetOriginalLanguage(param.input, param.source);
+  EXPECT_EQ(param.status, status);
+  if (status)
+  {
+    // { required to quiet clang warning about dangling else
+    EXPECT_EQ(param.expected, tag.GetOriginalLanguage());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(TestVideoInfoTag,
+                         OriginalLanguageTester,
+                         testing::ValuesIn(OriginalLanguageTests));

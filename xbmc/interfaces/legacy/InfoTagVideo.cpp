@@ -759,6 +759,12 @@ namespace XBMCAddon
       addAvailableArtworkRaw(infoTag, url, art_type, preview, referrer, cache, post, isgz, season);
     }
 
+    void InfoTagVideo::setAvailableFanart(const std::vector<Properties>& images)
+    {
+      XBMCAddonUtils::GuiLock lock(languageHook, offscreen);
+      setAvailableFanartRaw(infoTag, images);
+    }
+
     void InfoTagVideo::setDbIdRaw(CVideoInfoTag* infoTag, int dbId)
     {
       infoTag->m_iDbId = dbId;
@@ -885,7 +891,7 @@ namespace XBMCAddon
     bool InfoTagVideo::setOriginalLanguageRaw(CVideoInfoTag* infoTag, const String& language)
     {
       if (!infoTag->SetOriginalLanguage(language,
-                                        CVideoInfoTag::LanguageProcessing::PROCESSING_NORMALIZE))
+                                        CVideoInfoTag::LanguageTagSource::SOURCE_EXTERNAL))
       {
         CLog::LogF(LOGWARNING, "the language {} is not recognized", language);
         return false;
@@ -1096,6 +1102,31 @@ namespace XBMCAddon
     {
       infoTag->m_strPictureURL.AddParsedUrl(url, art_type, preview, referrer, cache, post, isgz,
                                             season);
+    }
+
+    void InfoTagVideo::setAvailableFanartRaw(CVideoInfoTag* infoTag,
+                                             const std::vector<Properties>& images)
+    {
+      infoTag->m_fanart.Clear();
+      for (const auto& dictionary : images)
+      {
+        auto getValue = [&](std::string_view str) -> const std::string&
+        {
+          const auto iter = dictionary.find(str);
+          if (iter != dictionary.end())
+            return iter->second;
+          else
+            return StringUtils::Empty;
+        };
+
+        if (const std::string& image = getValue("image"); !image.empty())
+        {
+          const std::string& preview = getValue("preview");
+          const std::string& colors = getValue("colors");
+          infoTag->m_fanart.AddFanart(image, preview, colors);
+        }
+      }
+      infoTag->m_fanart.Pack();
     }
   }
 }

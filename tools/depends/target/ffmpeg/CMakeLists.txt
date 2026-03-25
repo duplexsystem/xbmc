@@ -34,7 +34,6 @@ list(APPEND ffmpeg_conf --disable-doc
                         --disable-sdl2
                         --disable-vulkan
                         --enable-gpl
-                        --enable-postproc
                         --enable-runtime-cpudetect
                         --enable-pthreads
                         --extra-version="Kodi"
@@ -85,7 +84,7 @@ elseif(CORE_SYSTEM_NAME STREQUAL android)
   elseif(CPU MATCHES arm)
     list(APPEND ffmpeg_conf --cpu=cortex-a9)
   elseif(CPU MATCHES x86_64)
-    list(APPEND ffmpeg_conf --cpu=x86_64)
+    list(APPEND ffmpeg_conf --cpu=x86-64)
     list(APPEND ffmpeg_conf --extra-cflags=-mno-stackrealign)
   else()
     list(APPEND ffmpeg_conf --cpu=i686 --disable-mmx --disable-asm)
@@ -149,9 +148,14 @@ if(CMAKE_GENERATOR STREQUAL Ninja)
   endif()
 endif()
 
+if(NOT DISABLE_FFMPEG_SOURCE_PLUGINS)
+  set(sourceplugin_patch PATCH_COMMAND patch -p1 -i <SOURCE_DIR>/001-ffmpeg-all-libpostproc-plugin.patch)
+endif()
+
 include(ExternalProject)
 externalproject_add(ffmpeg
                     SOURCE_DIR ${CMAKE_SOURCE_DIR}
+                    ${sourceplugin_patch}
                     CONFIGURE_COMMAND ${pkgconf} ${pkgconf_path} <SOURCE_DIR>/configure
                       --prefix=${CMAKE_INSTALL_PREFIX}
                       --extra-version="kodi-${FFMPEG_VER}"

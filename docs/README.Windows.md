@@ -1,7 +1,7 @@
 ![Kodi Logo](resources/banner_slim.png)
 
 # Windows build guide
-This guide has been tested with Windows 11 Pro x64, version 24H2, build 26100.4652. Please read it in full before you proceed to familiarize yourself with the build procedure.
+This guide has been tested with Windows 11 Pro x64, version 25H2. Please read it in full before you proceed to familiarize yourself with the build procedure.
 
 ## Table of Contents
 1. **[Document conventions](#1-document-conventions)**
@@ -14,7 +14,7 @@ This guide has been tested with Windows 11 Pro x64, version 24H2, build 26100.46
   7.1. **[In-tree building of binary add-ons](#71-in-tree-building-of-binary-add-ons)**  
 
 ## 1. Document conventions
-This guide assumes you are using `Developer Command Prompt for VS 2022`, also known as `terminal`, `console`, `command-line` or simply `cli`. Commands need to be run at the terminal, one at a time and in the provided order.
+This guide assumes you are using `Developer Command Prompt for VS 2022` (or VS 2026), also known as `terminal`, `console`, `command-line` or simply `cli`. Commands need to be run at the terminal, one at a time and in the provided order.
 
 This is a comment that provides context:
 ```
@@ -53,12 +53,12 @@ Several different strategies are used to draw your attention to certain pieces o
 
 ## 2. Prerequisites
 To build Kodi:
-* **Windows** 64bit OS, Windows 10 or above (allows build of x64, win32, ARM64, UWP-64 and UWP-32)
-* **[CMake](https://cmake.org/download/)** version 3.28 or greater
+* **Windows** 64bit OS, Windows 10 or above (allows build of x64, win32, ARM64 and UWP-64)
+* **[CMake](https://cmake.org/download/)** version 3.30.6 or greater for Visual Studio 2022, version 4.2 or greater for Visual Studio 2026 (or version 4.1.1-msvc included with the initial release)
 * **[Git for Windows](https://gitforwindows.org/)**
 * **[Java Runtime Environment (JRE)](http://www.oracle.com/technetwork/java/javase/downloads/index.html)**
 * **[Nullsoft scriptable install system (NSIS)](http://nsis.sourceforge.net/Download)** version 3.04 or greater (Only needed if you want to generate an installer file)
-* **[Visual Studio 2022](https://visualstudio.microsoft.com/downloads/)** (Community Edition is fine)
+* **[Visual Studio 2022](https://aka.ms/vs/17/release/vs_community.exe)** or **[Visual Studio 2026](https://visualstudio.microsoft.com/downloads/)** (Community Edition is fine)
 
 To run Kodi you need a relatively recent CPU with integrated GPU or discrete GPU with up-to-date graphics device-drivers installed from the manufacturer's website.
 * **[AMD](https://support.amd.com/en-us/download)**
@@ -81,18 +81,21 @@ After install finishes, add java's executable file path to your `PATH` **[enviro
 ### NSIS install notes
 Default options are fine.
 
-### Visual Studio 2022 install notes
+### Visual Studio 2022/2026 install notes
 Start the Visual Studio installer and click **Workloads** select
 * Under **Desktop & Mobile** section select
   * `Desktop development with C++`
-    * Select the optional component: `Windows 11 SDK (10.0.22621.0)`
+    * Select the optional component: `Windows 11 SDK (10.0.22621.0)` (or higher version)
   * `WinUI application development` (if compiling for UWP)
     * Select the optional component: `Universal Windows Platform tools`
-    * Select the optional component: `C++ (v143) Universal Windows Platform tools`
+    * Select the optional component:
+      * `C++ (v143) Universal Windows Platform tools` (VS 2022)
+      * `C++ Universal Windows Platform tools (Latest)` (VS 2026)
 
-Click in **Individual components** select
+Click in **Individual components**
 * Under **Compilers, build tools and runtimes** section select
-  * `MSVC v143 - VS 2022 C++ ARM64 build tools (Latest)` (if compiling for ARM64)
+  * `MSVC v143 - VS 2022 C++ ARM64 build tools (Latest)` (if compiling the ARM64 desktop version with VS 2022)
+  * `MSVC Build Tools for ARM64/ARM64EC (Latest)` (if compiling the ARM64 desktop version with VS 2026)
 
 Hit `Install`. Yes, it will download and install almost 8GB of stuff for x64 only or up to 24GB if everything is selected for UWP / ARM64 as well.
 
@@ -117,7 +120,7 @@ To set up the build environment, several scripts must be called.
 > [!WARNING]
 > The scripts may fail if you have a space in the path to the bat files.
 
-Kodi can be built as either a normal 64bit, 32bit or ARM64 program, UWP 32bit and UWP 64bit. Unless there is a reason to prefer 32bit builds, we advise you to build Kodi for 64bit.
+Kodi can be built as either a normal 64bit, 32bit or ARM64 program and UWP 64bit. Unless there is a reason to prefer 32bit builds, we advise you to build Kodi for 64bit.
 
 > [!TIP]
 > Look for comments starting with `Or ...` and only execute the command(s) you need.
@@ -142,11 +145,6 @@ Or change to the UWP 64bit build directory:
 cd %userprofile%\kodi\tools\buildsteps\windows\x64-uwp
 ```
 
-Or change to the UWP 32bit build directory:
-```
-cd %userprofile%\kodi\tools\buildsteps\windows\win32-uwp
-```
-
 Download dependencies:
 ```
 download-dependencies.bat
@@ -158,11 +156,6 @@ download-dependencies.bat
 Download and setup the build environment for libraries:
 ```
 download-msys2.bat
-```
-
-Build FFmpeg:
-```
-make-mingwlibs.bat
 ```
 
 **[back to top](#table-of-contents)** | **[back to section top](#4-set-up-the-build-environment)**
@@ -212,14 +205,16 @@ Change to build directory:
 cd kodi-build
 ```
 
+*Note:* For *Visual Studio 2026* substitute "Visual Studio 18 2026" for "Visual Studio 17 2022" below.
+
 Configure build for 64bit (**recommended**):
 ```
-cmake -G "Visual Studio 17 2022" -A x64 -T host=x64 %userprofile%\kodi
+cmake -G "Visual Studio 17 2022" -A x64 %userprofile%\kodi
 ```
 
 Or configure build for 32bit:
 ```
-cmake -G "Visual Studio 17 2022" -A Win32 -T host=x64 %userprofile%\kodi
+cmake -G "Visual Studio 17 2022" -A Win32 %userprofile%\kodi
 ```
 
 Or configure build for ARM 64bit:
@@ -229,12 +224,7 @@ cmake -G "Visual Studio 17 2022" -A arm64 %userprofile%\kodi
 
 Or configure build for UWP 64bit:
 ```
-cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_NAME=WindowsStore -DCMAKE_SYSTEM_VERSION=10.0 -T host=x64 %userprofile%\kodi
-```
-
-Or configure build for UWP 32bit:
-```
-cmake -G "Visual Studio 17 2022" -A Win32 -DCMAKE_SYSTEM_NAME=WindowsStore -DCMAKE_SYSTEM_VERSION=10.0 -T host=x64 %userprofile%\kodi
+cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_NAME=WindowsStore -DCMAKE_SYSTEM_VERSION=10.0 %userprofile%\kodi
 ```
 
 Build Kodi:
@@ -250,7 +240,6 @@ cmake --build . --config "Release"
 
 *Normal* 32bit, 64bit and ARM 64bit builds generate an `exe` file ready to run, located at `%userprofile%\kodi-build\Debug` or `%userprofile%\kodi-build\Release`, depending on the build config.
 UWP builds generate `msix`, `appxsym` and `cer` files, located inside directories at `%userprofile%\kodi-build\AppPackages\kodi\`. You can install them following this **[guide](https://kodi.wiki/view/HOW-TO:Install_Kodi_for_Universal_Windows_Platform)**.
-
 
 **[back to top](#table-of-contents)** | **[back to section top](#6-build-kodi-manually)**
 

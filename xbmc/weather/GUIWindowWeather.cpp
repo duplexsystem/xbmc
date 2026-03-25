@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2005-2026 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -104,11 +104,11 @@ bool CGUIWindowWeather::OnMessage(CGUIMessage& message)
     {
       if (message.GetSenderId() == 0 && m_maxLocation > 0) //handle only message from builtin
       {
-        // Clamp location between 1 and m_maxLocation
-        CWeatherManager& wmgr{CServiceBroker::GetWeatherManager()};
-        int v = (wmgr.GetLocation() + message.GetParam1() - 1) % m_maxLocation + 1;
-        if (v < 1)
-          v += m_maxLocation;
+        // Clamp location between 1 and m_maxLocation & cast maxLoc to avoid signed modulo with unsigned type
+        // maxLoc is added before the modulo operation to ensure non-negative operands, for correct wrapping behavior
+        const CWeatherManager& wmgr{CServiceBroker::GetWeatherManager()};
+        const int maxLoc{static_cast<int>(m_maxLocation)};
+        int v = (wmgr.GetLocation() + message.GetParam1() - 1 + maxLoc) % maxLoc + 1;
         SetLocation(v);
         return true;
       }
@@ -168,11 +168,12 @@ void CGUIWindowWeather::UpdateLocations()
     {
       strLabel = StringUtils::Format("AreaCode {}", i);
     }
-    labels.emplace_back(strLabel, i);
 
     // in case it's a button, set the label
     if (i == iCurWeather)
       SET_CONTROL_LABEL(CONTROL_SELECTLOCATION, strLabel);
+
+    labels.emplace_back(std::move(strLabel), i);
   }
 
   SET_CONTROL_LABELS(CONTROL_SELECTLOCATION, iCurWeather, &labels);
@@ -184,7 +185,7 @@ void CGUIWindowWeather::UpdateButtons()
 
   SET_CONTROL_LABEL(CONTROL_BTNREFRESH, 184); //Refresh
 
-  CWeatherManager& wmgr{CServiceBroker::GetWeatherManager()};
+  const CWeatherManager& wmgr{CServiceBroker::GetWeatherManager()};
 
   SET_CONTROL_LABEL(WEATHER_LABEL_LOCATION, wmgr.GetLocation(wmgr.GetLocation()));
   SET_CONTROL_LABEL(CONTROL_LABELUPDATED, wmgr.GetLastUpdateTime());
@@ -226,7 +227,7 @@ void CGUIWindowWeather::FrameMove()
 
 /*!
  \brief Sets the location to the specified index and refreshes the weather
- \param loc the location index (in the range [1..MAXLOCATION])
+ \param loc the location index (can be any value except WeatherManager::INVALID_LOCATION)
  */
 void CGUIWindowWeather::SetLocation(int loc)
 {

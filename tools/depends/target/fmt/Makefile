@@ -1,7 +1,6 @@
 -include ../../Makefile.include
 include FMT-VERSION
-DEPS = Makefile FMT-VERSION ../../download-files.include \
-                            001-windows-pdb-symbol-gen.patch
+DEPS = Makefile FMT-VERSION ../../download-files.include
 
 CMAKE_OPTIONS=-DFMT_DOC=OFF -DFMT_INSTALL=ON -DFMT_TEST=OFF
 
@@ -13,7 +12,7 @@ else
   ifeq ($(PLATFORM),)
     PLATFORM = native
     TARBALLS_LOCATION = $(ROOT_DIR)
-    BASE_URL ?= http://mirrors.kodi.tv/build-deps/sources
+    BASE_URL ?= https://mirrors.kodi.tv/build-deps/sources
     RETRIEVE_TOOL := curl
     RETRIEVE_TOOL_FLAGS := -LsS --create-dirs --retry 10 --retry-connrefused -o
     ARCHIVE_TOOL := tar
@@ -42,7 +41,6 @@ endif
 	rm -rf $(PLATFORM); mkdir -p $(PLATFORM)
 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
 	cd $(PLATFORM); rm -rf build; mkdir -p build
-	cd $(PLATFORM); patch -p1 -i ../001-windows-pdb-symbol-gen.patch
 	cd $(PLATFORM)/build; $(CMAKE) $(CMAKE_OPTIONS) ..
 
 $(LIBDYLIB): $(PLATFORM)

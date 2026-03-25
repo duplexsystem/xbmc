@@ -9,6 +9,7 @@
 #include "VideoPlayerWebOS.h"
 
 #include "MediaPipelineWebOS.h"
+#include "ServiceBroker.h"
 #include "VideoPlayerAudioWebOS.h"
 #include "VideoPlayerVideoWebOS.h"
 #include "settings/Settings.h"
@@ -92,4 +93,9 @@ void CVideoPlayerWebOS::UpdateContent()
 {
   CVideoPlayer::UpdateContent();
   CreatePlayers();
+}
+
+bool CVideoPlayerWebOS::CanTempo()
+{
+  return m_mediaPipelineWebOS || CVideoPlayer::CanTempo();
 }

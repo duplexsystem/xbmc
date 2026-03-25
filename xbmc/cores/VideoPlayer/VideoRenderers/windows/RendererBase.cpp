@@ -1,5 +1,5 @@
 ﻿/*
- *  Copyright (C) 2017-2019 Team Kodi
+ *  Copyright (C) 2017-2026 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -445,9 +445,11 @@ void CRendererBase::UpdateVideoFilters()
       CLog::LogF(LOGDEBUG, "unable to create output shader.");
       m_outputShader.reset();
     }
-    else if (m_pLUTView && m_lutSize)
+    else
     {
-      m_outputShader->SetLUT(m_lutSize, m_pLUTView.Get());
+      m_outputShader->SetFinalShader(true);
+      if (m_pLUTView && m_lutSize)
+        m_outputShader->SetLUT(m_lutSize, m_pLUTView.Get());
     }
   }
 }

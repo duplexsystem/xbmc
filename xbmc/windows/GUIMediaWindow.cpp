@@ -38,11 +38,11 @@
 #include "filesystem/MultiPathDirectory.h"
 #include "filesystem/PluginDirectory.h"
 #include "filesystem/SmartPlaylistDirectory.h"
+#include "filesystem/VirtualDirectory.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIEditControl.h"
 #include "guilib/GUIKeyboardFactory.h"
 #include "guilib/GUIWindowManager.h"
-#include "guilib/LocalizeStrings.h"
 #include "input/actions/Action.h"
 #include "input/actions/ActionIDs.h"
 #include "interfaces/generic/ScriptInvocationManager.h"
@@ -53,11 +53,12 @@
 #include "network/Network.h"
 #include "playlists/PlayList.h"
 #include "profiles/ProfileManager.h"
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "storage/MediaManager.h"
-#include "threads/IRunnable.h"
 #include "utils/FileUtils.h"
 #include "utils/LabelFormatter.h"
 #include "utils/SortUtils.h"
@@ -84,36 +85,6 @@ using namespace ADDON;
 using namespace KODI;
 using namespace KODI::MESSAGING;
 using namespace std::chrono_literals;
-
-namespace
-{
-class CGetDirectoryItems : public IRunnable
-{
-public:
-  CGetDirectoryItems(XFILE::CVirtualDirectory &dir, CURL &url, CFileItemList &items, bool useDir)
-  : m_dir(dir), m_url(url), m_items(items), m_useDir(useDir)
-  {
-  }
-
-  void Run() override
-  {
-    m_result = m_dir.GetDirectory(m_url, m_items, m_useDir, true);
-  }
-
-  void Cancel() override
-  {
-    m_dir.CancelDirectory();
-  }
-
-  bool m_result = false;
-
-protected:
-  XFILE::CVirtualDirectory &m_dir;
-  CURL m_url;
-  CFileItemList &m_items;
-  bool m_useDir;
-};
-}
 
 CGUIMediaWindow::CGUIMediaWindow(int id, const char *xmlFile)
     : CGUIWindow(id, xmlFile)
@@ -595,14 +566,15 @@ void CGUIMediaWindow::UpdateButtons()
   if (m_guiState)
   {
     // Update sorting controls
-    if (m_guiState->GetSortOrder() == SortOrderNone)
+    if (m_guiState->GetSortOrder() == SortOrder::NONE)
     {
       CONTROL_DISABLE(CONTROL_BTNSORTASC);
     }
     else
     {
       CONTROL_ENABLE(CONTROL_BTNSORTASC);
-      SET_CONTROL_SELECTED(GetID(), CONTROL_BTNSORTASC, m_guiState->GetSortOrder() != SortOrderAscending);
+      SET_CONTROL_SELECTED(GetID(), CONTROL_BTNSORTASC,
+                           m_guiState->GetSortOrder() != SortOrder::ASCENDING);
     }
 
     // Update list/thumb control
@@ -614,13 +586,16 @@ void CGUIMediaWindow::UpdateButtons()
     else
       CONTROL_ENABLE(CONTROL_BTNSORTBY);
 
-    std::string sortLabel = StringUtils::Format(
-        g_localizeStrings.Get(550), g_localizeStrings.Get(m_guiState->GetSortMethodLabel()));
+    std::string sortLabel =
+        StringUtils::Format(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(550),
+                            CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(
+                                m_guiState->GetSortMethodLabel()));
     SET_CONTROL_LABEL(CONTROL_BTNSORTBY, sortLabel);
   }
 
   std::string items =
-      StringUtils::Format("{} {}", m_vecItems->GetObjectCount(), g_localizeStrings.Get(127));
+      StringUtils::Format("{} {}", m_vecItems->GetObjectCount(),
+                          CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(127));
   SET_CONTROL_LABEL(CONTROL_LABELFILES, items);
 
   SET_CONTROL_LABEL2(CONTROL_BTN_FILTER, GetProperty("filter").asString());
@@ -652,19 +627,27 @@ void CGUIMediaWindow::SortItems(CFileItemList &items)
     // We do this as the new SortBy methods are a superset of the SORT_METHOD methods, thus
     // not all are available. This may be removed once SORT_METHOD_* have been replaced by
     // SortBy.
-    if ((sorting.sortBy == SortByPlaylistOrder) && items.HasProperty(PROPERTY_SORT_ORDER))
+    if ((sorting.sortBy == SortBy::PLAYLIST_ORDER) && items.HasProperty(PROPERTY_SORT_ORDER))
     {
       SortBy sortBy = (SortBy)items.GetProperty(PROPERTY_SORT_ORDER).asInteger();
-      if (sortBy != SortByNone && sortBy != SortByPlaylistOrder && sortBy != SortByProgramCount)
+      if (sortBy != SortBy::NONE && sortBy != SortBy::PLAYLIST_ORDER &&
+          sortBy != SortBy::PROGRAM_COUNT)
       {
         sorting.sortBy = sortBy;
-        sorting.sortOrder = items.GetProperty(PROPERTY_SORT_ASCENDING).asBoolean() ? SortOrderAscending : SortOrderDescending;
-        sorting.sortAttributes = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_FILELISTS_IGNORETHEWHENSORTING) ? SortAttributeIgnoreArticle : SortAttributeNone;
+        sorting.sortOrder = items.GetProperty(PROPERTY_SORT_ASCENDING).asBoolean()
+                                ? SortOrder::ASCENDING
+                                : SortOrder::DESCENDING;
+        const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+        sorting.sortAttributes =
+            settings->GetBool(CSettings::SETTING_FILELISTS_IGNORETHEWHENSORTING)
+                ? SortAttributeIgnoreArticle
+                : SortAttributeNone;
 
         // if the sort order is descending, we need to switch the original sort order, as we assume
-        // in CGUIViewState::AddPlaylistOrder that SortByPlaylistOrder is ascending.
-        if (guiState->GetSortOrder() == SortOrderDescending)
-          sorting.sortOrder = sorting.sortOrder == SortOrderDescending ? SortOrderAscending : SortOrderDescending;
+        // in CGUIViewState::AddPlaylistOrder that SortBy::PLAYLIST_ORDER is ascending.
+        if (guiState->GetSortOrder() == SortOrder::DESCENDING)
+          sorting.sortOrder = sorting.sortOrder == SortOrder::DESCENDING ? SortOrder::ASCENDING
+                                                                         : SortOrder::DESCENDING;
       }
     }
 
@@ -694,7 +677,7 @@ void CGUIMediaWindow::FormatItemLabels(CFileItemList &items, const LABEL_MASKS &
       fileFormatter.FormatLabels(pItem.get());
   }
 
-  if (items.GetSortMethod() == SortByLabel)
+  if (items.GetSortMethod() == SortBy::LABEL)
     items.ClearSortState();
 }
 
@@ -911,15 +894,18 @@ bool CGUIMediaWindow::Update(const std::string &strDirectory, bool updateFilterP
   if (showLabel && (m_vecItems->Size() == 0 || !m_guiState->DisableAddSourceButtons()) &&
       iWindow != WINDOW_MUSIC_PLAYLIST_EDITOR)
   {
-    const std::string& strLabel = g_localizeStrings.Get(showLabel);
+    const std::string& strLabel =
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(showLabel);
     CFileItemPtr pItem(new CFileItem(strLabel));
     pItem->SetPath("add");
     pItem->SetArt("icon", "DefaultAddSource.png");
     pItem->SetLabel(strLabel);
     pItem->SetLabelPreformatted(true);
     pItem->SetFolder(true);
-    pItem->SetSpecialSort(CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_addSourceOnTop ?
-                                             SortSpecialOnTop : SortSpecialOnBottom);
+    pItem->SetSpecialSort(
+        CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_addSourceOnTop
+            ? SortSpecial::TOP
+            : SortSpecial::BOTTOM);
     m_vecItems->Add(pItem);
   }
   m_iLastControl = GetFocusedControlID();
@@ -1301,7 +1287,10 @@ bool CGUIMediaWindow::GoParentFolder()
   // No items to show so go another level up
   if (!m_vecItems->GetPath().empty() && (m_filter.IsEmpty() ? m_vecItems->Size() : m_unfilteredItems->Size()) <= 0)
   {
-    CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(2080), g_localizeStrings.Get(2081));
+    CGUIDialogKaiToast::QueueNotification(
+        CGUIDialogKaiToast::Info,
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(2080),
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(2081));
     return GoParentFolder();
   }
   return true;
@@ -2207,21 +2196,21 @@ bool CGUIMediaWindow::GetDirectoryItems(CURL &url, CFileItemList &items, bool us
   if (m_backgroundLoad)
   {
     bool ret = true;
-    CGetDirectoryItems getItems(m_rootDir, url, items, useDir);
+    XFILE::CGetDirectoryItems getItems(m_rootDir, url, items, useDir, true);
 
     if (!CGUIDialogBusy::Wait(&getItems, 100, true))
     {
       // cancelled
       ret = false;
     }
-    else if (!getItems.m_result)
+    else if (!getItems.GetResult())
     {
       if (CServiceBroker::GetAppMessenger()->IsProcessThread() && m_rootDir.GetDirImpl() &&
           !m_rootDir.GetDirImpl()->ProcessRequirements())
       {
         ret = false;
       }
-      else if (!CGUIDialogBusy::Wait(&getItems, 100, true) || !getItems.m_result)
+      else if (!CGUIDialogBusy::Wait(&getItems, 100, true) || !getItems.GetResult())
       {
         ret = false;
       }

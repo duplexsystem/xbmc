@@ -276,13 +276,12 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
   // try to abort after 30 seconds
   m_timeout.Set(30s);
 
+  CURL url = m_pInput->GetURL();
   if (m_pInput->IsStreamType(DVDSTREAM_TYPE_FFMPEG))
   {
     // special stream type that makes avformat handle file opening
     // allows internal ffmpeg protocols to be used
     AVDictionary* options = GetFFMpegOptionsFromInput();
-
-    CURL url = m_pInput->GetURL();
 
     int result = -1;
     if (url.IsProtocol("mms"))
@@ -296,6 +295,20 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
         url.SetProtocol("mmst");
         strFile = url.Get();
       }
+    }
+    else if (url.IsProtocol("tcp"))
+    {
+      // tcp streams cannot handle multiple connection attempts, so exit early on failure
+      // rather than falling through to the retry logic below
+      result = avformat_open_input(&m_pFormatContext, url.Get().c_str(), iformat, &options);
+      if (result < 0)
+      {
+        CLog::Log(LOGDEBUG, "Error, could not open file {}", CURL::GetRedacted(url.Get()));
+        Dispose();
+        av_dict_free(&options);
+        return false;
+      }
+      strFile = url.Get();
     }
     else if (url.IsProtocol("udp") || url.IsProtocol("rtp"))
     {
@@ -462,8 +475,8 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
   }
 
   // don't re-open mpegts streams with hevc encoding as the params are not correctly detected again
-  if (iformat && (strcmp(iformat->name, "mpegts") == 0) && !fileinfo && !isBluray &&
-      m_pFormatContext->nb_streams > 0 && m_pFormatContext->streams != nullptr &&
+  if (iformat && (strcmp(iformat->name, "mpegts") == 0) && !url.IsProtocol("tcp") && !fileinfo &&
+      !isBluray && m_pFormatContext->nb_streams > 0 && m_pFormatContext->streams != nullptr &&
       m_pFormatContext->streams[0]->codecpar->codec_id != AV_CODEC_ID_HEVC)
   {
     av_opt_set_int(m_pFormatContext, "analyzeduration", 500000, 0);
@@ -1735,8 +1748,24 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
       }
       case AVMEDIA_TYPE_DATA:
       {
-        stream = new CDemuxStream();
-        stream->type = StreamType::DATA;
+        if (pStream->codecpar->codec_tag == MKTAG('w', 'v', 't', 't'))
+        {
+          // WebVTT ISOBMFF format
+          CDemuxStreamSubtitleFFmpeg* st = new CDemuxStreamSubtitleFFmpeg(pStream);
+          if (av_dict_get(pStream->metadata, "title", nullptr, 0))
+            st->m_description = av_dict_get(pStream->metadata, "title", nullptr, 0)->value;
+
+          stream = st;
+
+          // To use COverlayCodecWebVTT decoder set codec id and extradata
+          pStream->codecpar->codec_id = AV_CODEC_ID_WEBVTT;
+          stream->extraData = FFmpegExtraData(reinterpret_cast<const uint8_t*>("fmp4"), 4);
+        }
+        else
+        {
+          stream = new CDemuxStream();
+          stream->type = StreamType::DATA;
+        }
         break;
       }
       case AVMEDIA_TYPE_SUBTITLE:
@@ -1753,9 +1782,14 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
           CDemuxStreamSubtitleFFmpeg* st = new CDemuxStreamSubtitleFFmpeg(pStream);
           stream = st;
 
+          if (pStream->codecpar->codec_id == AV_CODEC_ID_WEBVTT)
+          {
+            stream->flags = static_cast<StreamFlags>(static_cast<int>(stream->flags) |
+                                                     FLAG_WEBVTT_DATA_PACKETS);
+          }
+
           if (av_dict_get(pStream->metadata, "title", NULL, 0))
             st->m_description = av_dict_get(pStream->metadata, "title", NULL, 0)->value;
-
           break;
         }
       }
@@ -1825,7 +1859,8 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
 
     stream->source = STREAM_SOURCE_DEMUX;
     stream->pPrivate = pStream;
-    stream->flags = (StreamFlags)pStream->disposition;
+    stream->flags =
+        static_cast<StreamFlags>(static_cast<int>(stream->flags) | pStream->disposition);
 
     AVDictionaryEntry* langTag = av_dict_get(pStream->metadata, "language", NULL, 0);
     if (!langTag)
@@ -1992,16 +2027,29 @@ int CDVDDemuxFFmpeg::GetChapter()
   if (ich)
     return ich->GetChapter();
 
-  if (m_pFormatContext == NULL
-  || m_currentPts == DVD_NOPTS_VALUE)
+  if (m_pFormatContext == NULL || m_currentPts == DVD_NOPTS_VALUE)
     return 0;
 
-  for(unsigned i = 0; i < m_pFormatContext->nb_chapters; i++)
+  for (unsigned i = 0; i < m_pFormatContext->nb_chapters; i++)
   {
-    AVChapter* chapter = m_pFormatContext->chapters[i];
-    if (m_currentPts >= ConvertTimestamp(chapter->start, chapter->time_base.den, chapter->time_base.num)
-    && m_currentPts <  ConvertTimestamp(chapter->end,   chapter->time_base.den, chapter->time_base.num))
-      return i + 1;
+    const AVChapter* chapter = m_pFormatContext->chapters[i];
+    const double startPts =
+        ConvertTimestamp(chapter->start, chapter->time_base.den, chapter->time_base.num);
+
+    if (i == m_pFormatContext->nb_chapters - 1)
+    {
+      if (m_currentPts >= startPts)
+        return i + 1;
+    }
+    else
+    {
+      const AVChapter* nextChapter = m_pFormatContext->chapters[i + 1];
+      const double nextStartPts = ConvertTimestamp(nextChapter->start, nextChapter->time_base.den,
+                                                   nextChapter->time_base.num);
+
+      if (m_currentPts >= startPts && m_currentPts < nextStartPts)
+        return i + 1;
+    }
   }
 
   return 0;
@@ -2026,18 +2074,22 @@ void CDVDDemuxFFmpeg::GetChapterName(std::string& strChapterName, int chapterIdx
   }
 }
 
-int64_t CDVDDemuxFFmpeg::GetChapterPos(int chapterIdx)
+std::chrono::milliseconds CDVDDemuxFFmpeg::GetChapterPos(int chapterIdx)
 {
+  using namespace std::chrono_literals;
+
   if (chapterIdx <= 0 || chapterIdx > GetChapterCount())
     chapterIdx = GetChapter();
   if (chapterIdx <= 0)
-    return 0;
+    return 0ms;
 
   std::shared_ptr<CDVDInputStream::IChapter> ich = std::dynamic_pointer_cast<CDVDInputStream::IChapter>(m_pInput);
   if (ich)
     return ich->GetChapterPos(chapterIdx);
 
-  return static_cast<int64_t>(m_pFormatContext->chapters[chapterIdx - 1]->start * av_q2d(m_pFormatContext->chapters[chapterIdx - 1]->time_base));
+  std::chrono::duration<float> fsec(m_pFormatContext->chapters[chapterIdx - 1]->start *
+                                    av_q2d(m_pFormatContext->chapters[chapterIdx - 1]->time_base));
+  return std::chrono::duration_cast<std::chrono::milliseconds>(fsec);
 }
 
 bool CDVDDemuxFFmpeg::SeekChapter(int chapter, double* startpts)
@@ -2054,7 +2106,8 @@ bool CDVDDemuxFFmpeg::SeekChapter(int chapter, double* startpts)
 
     if (startpts)
     {
-      *startpts = DVD_SEC_TO_TIME(static_cast<double>(ich->GetChapterPos(chapter)));
+      *startpts =
+          DVD_SEC_TO_TIME(std::chrono::duration<double>(ich->GetChapterPos(chapter)).count());
     }
 
     Flush();

@@ -13,7 +13,6 @@
 #include "addons/AddonManager.h"
 #include "addons/addoninfo/AddonInfo.h"
 #include "addons/addoninfo/AddonType.h"
-#include "guilib/LocalizeStrings.h"
 #include "jobs/JobManager.h"
 #include "messaging/ApplicationMessenger.h"
 #include "pvr/PVRConstants.h" // PVR_CLIENT_INVALID_UID
@@ -23,6 +22,8 @@
 #include "pvr/addons/PVRClient.h"
 #include "pvr/addons/PVRClientUID.h"
 #include "pvr/guilib/PVRGUIProgressHandler.h"
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "utils/StringUtils.h"
 #include "utils/log.h"
 
@@ -226,7 +227,8 @@ void CPVRClients::UpdateClients(const std::string& changedAddonId /* = "" */)
     CServiceBroker::GetPVRManager().Stop();
 
     auto progressHandler = std::make_unique<CPVRGUIProgressHandler>(
-        g_localizeStrings.Get(19239)); // Creating PVR clients
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(
+            19239)); // Creating PVR clients
 
     size_t i = 0;
     for (const auto& client : clientsToCreate)
@@ -242,8 +244,10 @@ void CPVRClients::UpdateClients(const std::string& changedAddonId /* = "" */)
         CServiceBroker::GetAddonMgr().DisableAddon(client->ID(),
                                                    AddonDisabledReason::PERMANENT_FAILURE);
         CServiceBroker::GetJobManager()->AddJob(
-            new CPVREventLogJob(true, EventLevel::Error, client->Name(),
-                                g_localizeStrings.Get(24070), client->Icon()),
+            new CPVREventLogJob(
+                true, EventLevel::Error, client->Name(),
+                CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(24070),
+                client->Icon()),
             nullptr);
       }
     }
@@ -626,8 +630,7 @@ bool CPVRClients::GetTimers(const std::vector<std::shared_ptr<CPVRClient>>& clie
   return ForClients(
              std::source_location::current().function_name(), clients,
              [timers](const std::shared_ptr<const CPVRClient>& client)
-             { return client->GetTimers(timers); },
-             failedClients) == PVR_ERROR_NO_ERROR;
+             { return client->GetTimers(timers); }, failedClients) == PVR_ERROR_NO_ERROR;
 }
 
 PVR_ERROR CPVRClients::UpdateTimerTypes(const std::vector<std::shared_ptr<CPVRClient>>& clients,
@@ -664,8 +667,7 @@ PVR_ERROR CPVRClients::GetRecordings(const std::vector<std::shared_ptr<CPVRClien
   return ForClients(
       std::source_location::current().function_name(), clients,
       [recordings, deleted](const std::shared_ptr<const CPVRClient>& client)
-      { return client->GetRecordings(recordings, deleted); },
-      failedClients);
+      { return client->GetRecordings(recordings, deleted); }, failedClients);
 }
 
 PVR_ERROR CPVRClients::DeleteAllRecordingsFromTrash() const
@@ -707,8 +709,7 @@ PVR_ERROR CPVRClients::GetProviders(const std::vector<std::shared_ptr<CPVRClient
   return ForClients(
       std::source_location::current().function_name(), clients,
       [providers](const std::shared_ptr<const CPVRClient>& client)
-      { return client->GetProviders(*providers); },
-      failedClients);
+      { return client->GetProviders(*providers); }, failedClients);
 }
 
 PVR_ERROR CPVRClients::GetChannelGroups(const std::vector<std::shared_ptr<CPVRClient>>& clients,
@@ -718,8 +719,7 @@ PVR_ERROR CPVRClients::GetChannelGroups(const std::vector<std::shared_ptr<CPVRCl
   return ForClients(
       std::source_location::current().function_name(), clients,
       [groups](const std::shared_ptr<const CPVRClient>& client)
-      { return client->GetChannelGroups(groups); },
-      failedClients);
+      { return client->GetChannelGroups(groups); }, failedClients);
 }
 
 PVR_ERROR CPVRClients::GetChannelGroupMembers(
@@ -731,8 +731,7 @@ PVR_ERROR CPVRClients::GetChannelGroupMembers(
   return ForClients(
       std::source_location::current().function_name(), clients,
       [&group, &groupMembers](const std::shared_ptr<const CPVRClient>& client)
-      { return client->GetChannelGroupMembers(group, groupMembers); },
-      failedClients);
+      { return client->GetChannelGroupMembers(group, groupMembers); }, failedClients);
 }
 
 std::vector<std::shared_ptr<CPVRClient>> CPVRClients::GetClientsSupportingChannelScan() const
@@ -750,7 +749,8 @@ std::vector<std::shared_ptr<CPVRClient>> CPVRClients::GetClientsSupportingChanne
   return possibleScanClients;
 }
 
-std::vector<std::shared_ptr<CPVRClient>> CPVRClients::GetClientsSupportingChannelSettings(bool bRadio) const
+std::vector<std::shared_ptr<CPVRClient>> CPVRClients::GetClientsSupportingChannelSettings(
+    bool bRadio) const
 {
   std::vector<std::shared_ptr<CPVRClient>> possibleSettingsClients;
 
@@ -917,7 +917,7 @@ void CPVRClients::ConnectionStateChange(const CPVRClient* client,
   if (!strMessage.empty())
     strMsg = strMessage;
   else
-    strMsg = g_localizeStrings.Get(iMsg);
+    strMsg = CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(iMsg);
 
   if (!strConnectionString.empty())
     strMsg = StringUtils::Format("{} ({})", strMsg, strConnectionString);

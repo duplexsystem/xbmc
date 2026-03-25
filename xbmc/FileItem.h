@@ -124,13 +124,13 @@ public:
   void SetURL(const CURL& url);
   bool IsURL(const CURL& url) const;
   const std::string& GetPath() const;
-  void SetPath(std::string_view path);
+  void SetPath(std::string path);
   bool IsPath(const std::string& path, bool ignoreURLOptions = false) const;
 
   const CURL& GetDynURL() const;
   void SetDynURL(const CURL& url);
   const std::string &GetDynPath() const;
-  void SetDynPath(std::string_view path);
+  void SetDynPath(std::string path);
 
   CFileItem& operator=(const CFileItem& item);
   void Archive(CArchive& ar) override;
@@ -233,8 +233,8 @@ public:
   void SetDepth(int depth) { m_depth = depth; }
   int GetStartPartNumber() const { return m_lStartPartNumber; }
   void SetStartPartNumber(int number) { m_lStartPartNumber = number; }
-  bool SortsOnTop() const { return m_specialSort == SortSpecialOnTop; }
-  bool SortsOnBottom() const { return m_specialSort == SortSpecialOnBottom; }
+  bool SortsOnTop() const { return m_specialSort == SortSpecial::TOP; }
+  bool SortsOnBottom() const { return m_specialSort == SortSpecial::BOTTOM; }
   void SetSpecialSort(SortSpecial sort) { m_specialSort = sort; }
 
   inline bool HasMusicInfoTag() const { return m_musicInfoTag != nullptr; }
@@ -401,7 +401,7 @@ public:
   std::string GetThumbHideIfUnwatched(const CFileItem* item) const;
 
   // Gets the correct movie title
-  std::string GetMovieName(bool bUseFolderNames = false) const;
+  std::string GetMovieName(bool bUseFolderNames = false, int depth = 0) const;
 
   /*! \brief Find the base movie path (i.e. the item the user expects us to use to lookup the movie)
    For folder items, with "use foldernames for lookups" it returns the folder.
@@ -573,7 +573,7 @@ private:
   int m_depth{1};
   int m_lStartPartNumber{1};
   KODI::UTILS::CLockInfo m_lockInfo;
-  SortSpecial m_specialSort{SortSpecialNone};
+  SortSpecial m_specialSort{SortSpecial::NONE};
   bool m_bIsParentFolder{false};
   bool m_bCanQueue{true};
   bool m_bLabelPreformatted{false};

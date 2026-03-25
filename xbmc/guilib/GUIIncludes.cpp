@@ -9,10 +9,14 @@
 #include "GUIIncludes.h"
 
 #include "GUIInfoManager.h"
+#include "ServiceBroker.h"
+#include "URL.h"
 #include "addons/Skin.h"
+#include "filesystem/ResourceFile.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/guiinfo/GUIInfoLabel.h"
 #include "interfaces/info/SkinVariable.h"
+#include "utils/Set.h"
 #include "utils/StringUtils.h"
 #include "utils/XBMCTinyXML.h"
 #include "utils/XMLUtils.h"
@@ -20,33 +24,50 @@
 
 #include <algorithm>
 
-using namespace KODI::GUILIB;
+namespace
+{
 
-static constexpr std::array<std::string_view, 16> CONSTANT_ATTRIBUTES = {
-    "acceleration", "border", "center", "delay", "end", "h",     "height", "max",
-    "min",          "repeat", "start",  "time",  "w",   "width", "x",      "y",
-};
-static_assert(std::ranges::is_sorted(CONSTANT_ATTRIBUTES));
+constexpr auto CONSTANT_ATTRIBUTES = make_set<std::string_view>({
+    "acceleration",
+    "border",
+    "center",
+    "delay",
+    "end",
+    "h",
+    "height",
+    "max",
+    "min",
+    "repeat",
+    "start",
+    "time",
+    "w",
+    "width",
+    "x",
+    "y",
 
-static constexpr std::array<std::string_view, 35> CONSTANT_NODES = {
+});
+
+constexpr auto CONSTANT_NODES = make_set<std::string_view>({
     "bordersize",  "bottom",     "centerbottom",  "centerleft", "centerright", "centertop",
     "depth",       "fadetime",   "focusposition", "height",     "itemgap",     "left",
     "movement",    "offsetx",    "offsety",       "pauseatend", "posx",        "posy",
     "radioheight", "radioposx",  "radioposy",     "radiowidth", "right",       "sliderheight",
     "sliderwidth", "spinheight", "spinposx",      "spinposy",   "spinwidth",   "textoffsetx",
     "textoffsety", "textwidth",  "timeperimage",  "top",        "width",
-};
-static_assert(std::ranges::is_sorted(CONSTANT_NODES));
+});
 
-static constexpr std::string_view EXPRESSION_ATTRIBUTE = "condition";
+constexpr std::string_view EXPRESSION_ATTRIBUTE = "condition";
 
-static constexpr std::array<std::string_view, 4> EXPRESSION_NODES = {
+constexpr auto EXPRESSION_NODES = make_set<std::string_view>({
     "enable",
     "selected",
     "usealttexture",
     "visible",
-};
-static_assert(std::ranges::is_sorted(EXPRESSION_NODES));
+});
+
+} // namespace
+
+using namespace KODI::GUILIB;
 
 CGUIIncludes::CGUIIncludes() = default;
 
@@ -190,11 +211,12 @@ void CGUIIncludes::LoadIncludes(const TiXmlElement *node)
       if (haveParamTags && !definitionTag)
         CLog::Log(LOGWARNING, "Skin has invalid include definition: {}", tagName);
       else
-        m_includes.try_emplace(tagName, std::make_pair(*includeBody, std::move(defaultParams)));
+        m_includes.try_emplace(tagName, *includeBody, std::move(defaultParams));
     }
     else if (child->Attribute("file"))
     {
-      std::string file = g_SkinInfo->GetSkinPath(child->Attribute("file"));
+      auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
+      std::string file = skin ? skin->GetSkinPath(child->Attribute("file")) : "";
       const char *condition = child->Attribute("condition");
 
       if (condition)
@@ -223,22 +245,26 @@ void CGUIIncludes::FlattenExpressions()
 void CGUIIncludes::FlattenExpression(std::string &expression, const std::vector<std::string> &resolved)
 {
   std::string original(expression);
-  GUIINFO::CGUIInfoLabel::ReplaceSpecialKeywordReferences(expression, "EXP", [&](const std::string &expressionName) -> std::string {
-    if (std::find(resolved.begin(), resolved.end(), expressionName) != resolved.end())
-    {
-      CLog::Log(LOGERROR, "Skin has a circular expression \"{}\": {}", resolved.back(), original);
-      return std::string();
-    }
-    auto it = m_expressions.find(expressionName);
-    if (it == m_expressions.end())
-      return std::string();
+  GUIINFO::CGUIInfoLabel::ReplaceSpecialKeywordReferences(
+      expression, "EXP",
+      [&](const std::string& expressionName) -> std::string
+      {
+        if (std::ranges::find(resolved, expressionName) != resolved.end())
+        {
+          CLog::Log(LOGERROR, "Skin has a circular expression \"{}\": {}", resolved.back(),
+                    original);
+          return std::string();
+        }
+        auto it = m_expressions.find(expressionName);
+        if (it == m_expressions.end())
+          return std::string();
 
-    std::vector<std::string> rescopy = resolved;
-    rescopy.push_back(expressionName);
-    FlattenExpression(it->second, rescopy);
+        std::vector<std::string> rescopy = resolved;
+        rescopy.push_back(expressionName);
+        FlattenExpression(it->second, rescopy);
 
-    return it->second;
-  });
+        return it->second;
+      });
 }
 
 void CGUIIncludes::FlattenSkinVariableConditions()
@@ -324,7 +350,7 @@ void CGUIIncludes::ResolveConstants(TiXmlElement *node)
 
   TiXmlNode *child = node->FirstChild();
   if (child && child->Type() == TiXmlNode::TINYXML_TEXT &&
-      std::ranges::binary_search(CONSTANT_NODES, node->ValueStr()))
+      CONSTANT_NODES.contains(node->ValueStr()))
   {
     child->SetValue(ResolveConstant(child->ValueStr()));
   }
@@ -333,7 +359,7 @@ void CGUIIncludes::ResolveConstants(TiXmlElement *node)
     TiXmlAttribute *attribute = node->FirstAttribute();
     while (attribute)
     {
-      if (std::ranges::binary_search(CONSTANT_ATTRIBUTES, attribute->Name()))
+      if (CONSTANT_ATTRIBUTES.contains(attribute->Name()))
         attribute->SetValue(ResolveConstant(attribute->ValueStr()));
 
       attribute = attribute->Next();
@@ -348,7 +374,7 @@ void CGUIIncludes::ResolveExpressions(TiXmlElement *node)
 
   TiXmlNode *child = node->FirstChild();
   if (child && child->Type() == TiXmlNode::TINYXML_TEXT &&
-      std::ranges::binary_search(EXPRESSION_NODES, node->ValueStr()))
+      EXPRESSION_NODES.contains(node->ValueStr()))
   {
     child->SetValue(ResolveExpressions(child->ValueStr()));
   }
@@ -376,7 +402,30 @@ void CGUIIncludes::ResolveIncludes(TiXmlElement *node, std::map<INFO::InfoPtr, b
     // file: load includes from specified XML file
     const char *file = include->Attribute("file");
     if (file)
-      Load(g_SkinInfo->GetSkinPath(file));
+    {
+      const CURL includeUrl{file};
+
+      if (includeUrl.IsProtocol("resource"))
+      {
+        std::string resourceFile;
+
+        if (!XFILE::CResourceFile::TranslatePath(includeUrl, resourceFile))
+        {
+          CLog::Log(LOGERROR, "Unable to translate resource include file: {}", file);
+          include = include->NextSiblingElement("include");
+          continue;
+        }
+
+        CLog::Log(LOGDEBUG, "Includes: resolved resource include '{}' to '{}'", file, resourceFile);
+        Load(resourceFile);
+      }
+      else
+      {
+        auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
+        if (skin)
+          Load(skin->GetSkinPath(file));
+      }
+    }
 
     // condition: process include if condition evals to true
     const char *condition = include->Attribute("condition");
@@ -653,14 +702,15 @@ std::string CGUIIncludes::ResolveConstant(const std::string &constant) const
 std::string CGUIIncludes::ResolveExpressions(const std::string &expression) const
 {
   std::string work(expression);
-  GUIINFO::CGUIInfoLabel::ReplaceSpecialKeywordReferences(work, "EXP",
-                                                          [&](const std::string& str) -> std::string
-                                                          {
-                                                            const auto it = m_expressions.find(str);
-                                                            if (it != m_expressions.end())
-                                                              return it->second;
-                                                            return "";
-                                                          });
+  GUIINFO::CGUIInfoLabel::ReplaceSpecialKeywordReferences(
+      work, "EXP",
+      [this](const std::string& str) -> std::string
+      {
+        const auto it = m_expressions.find(str);
+        if (it != m_expressions.end())
+          return it->second;
+        return "";
+      });
 
   return work;
 }

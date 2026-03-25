@@ -30,6 +30,8 @@
 #include "filesystem/Directory.h"
 #include "filesystem/SpecialProtocol.h"
 #include "jobs/JobManager.h"
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "utils/FileUtils.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
@@ -794,6 +796,7 @@ void CAddonMgr::OnPostUnInstall(const std::string& id)
   std::unique_lock lock(m_critSection);
   m_disabled.erase(id);
   RemoveAllUpdateRulesFromList(id);
+  CServiceBroker::GetResourcesComponent().GetLocalizeStrings().ClearAddonStrings(id);
   m_events.Publish(AddonEvents::UnInstalled(id));
 }
 

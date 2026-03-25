@@ -15,6 +15,7 @@
 
 #include "Teletext.h"
 
+#include "ServiceBroker.h"
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPlayer.h"
 #include "filesystem/SpecialProtocol.h"
@@ -23,6 +24,7 @@
 #include "input/keyboard/KeyIDs.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 #include <harfbuzz/hb-ft.h>
 

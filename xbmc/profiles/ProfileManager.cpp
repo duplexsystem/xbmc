@@ -33,7 +33,6 @@
 #include "filesystem/SpecialProtocol.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIWindowManager.h"
-#include "guilib/LocalizeStrings.h"
 #include "guilib/StereoscopicsManager.h" //! @todo Remove me
 #include "input/InputManager.h"
 #include "interfaces/json-rpc/JSONRPC.h" //! @todo Remove me
@@ -41,6 +40,8 @@
 #include "network/Network.h" //! @todo Remove me
 #include "network/NetworkServices.h" //! @todo Remove me
 #include "pvr/PVRManager.h" //! @todo Remove me
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/SettingsManager.h"
@@ -299,8 +300,9 @@ bool CProfileManager::LoadProfile(unsigned int index)
 
   // save any settings of the currently used skin but only if the (master)
   // profile hasn't just been loaded as a temporary profile for login
-  if (g_SkinInfo != nullptr && !m_previousProfileLoadedForLogin)
-    g_SkinInfo->SaveSettings();
+  auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
+  if (skin && !m_previousProfileLoadedForLogin)
+    skin->SaveSettings();
 
   // @todo: why is m_settings not used here?
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
@@ -425,7 +427,8 @@ void CProfileManager::FinalizeLoadProfile()
   stereoscopicsManager.Initialize();
 
   // Load initial window
-  int firstWindow = g_SkinInfo->GetFirstWindow();
+  auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
+  int firstWindow = skin ? skin->GetFirstWindow() : WINDOW_HOME;
 
   CServiceBroker::GetGUI()->GetWindowManager().ChangeActiveWindow(firstWindow);
 
@@ -461,7 +464,10 @@ void CProfileManager::LogOff()
   CServiceBroker::GetGUI()->GetWindowManager().ActivateWindow(WINDOW_LOGIN_SCREEN, {}, false);
 
   if (!CServiceBroker::GetNetwork().GetServices().StartEventServer()) // event server could be needed in some situations
-    CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Warning, g_localizeStrings.Get(33102), g_localizeStrings.Get(33100));
+    CGUIDialogKaiToast::QueueNotification(
+        CGUIDialogKaiToast::Warning,
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(33102),
+        CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(33100));
 }
 
 bool CProfileManager::DeleteProfile(unsigned int index)

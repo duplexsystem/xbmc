@@ -10,6 +10,7 @@
 
 #include "CompileInfo.h"
 #include "LangInfo.h"
+#include "addons/Addon.h"
 #include "addons/Repository.h"
 #include "addons/addoninfo/AddonInfo.h"
 #include "addons/addoninfo/AddonType.h"
@@ -241,6 +242,16 @@ AddonInfoPtr CAddonInfoBuilder::Generate(const tinyxml2::XMLElement* baseElement
     return addon;
 
   return nullptr;
+}
+
+AddonInfoPtr CAddonInfoBuilder::Generate(IAddon& addon)
+{
+  CAddon* baseAddon = dynamic_cast<CAddon*>(&addon);
+
+  if (baseAddon != nullptr)
+    return baseAddon->AddonInfo();
+
+  return {};
 }
 
 void CAddonInfoBuilder::SetInstallData(const AddonInfoPtr& addon,
@@ -829,6 +840,8 @@ bool CAddonInfoBuilder::PlatformSupportsAddon(const AddonInfoPtr& addon)
     "linux-armv7",
 #elif defined(__aarch64__)
     "linux-aarch64",
+#elif defined(__ARM_ARCH_8A__)
+      "linux-armv8",
 #elif defined(__i686__)
     "linux-i686",
 #elif defined(__x86_64__)

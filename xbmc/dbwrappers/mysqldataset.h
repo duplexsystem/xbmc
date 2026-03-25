@@ -15,7 +15,7 @@
 #ifdef HAS_MYSQL
 #include <mysql/mysql.h>
 #elif defined(HAS_MARIADB)
-#include <mariadb/mysql.h>
+#include <mysql.h>
 #endif
 
 namespace dbiplus
@@ -31,7 +31,6 @@ protected:
   /* connect descriptor */
   MYSQL* conn{nullptr};
   bool _in_transaction{false};
-  int last_err;
 
 public:
   /* default constructor */

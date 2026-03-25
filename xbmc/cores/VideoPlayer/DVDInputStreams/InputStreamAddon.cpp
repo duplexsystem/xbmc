@@ -85,10 +85,10 @@ bool CInputStreamAddon::Supports(const AddonInfoPtr& addonInfo, const CFileItem&
   CVariant oldAddonProp = fileitem.GetProperty("inputstreamaddon");
   if (!oldAddonProp.isNull())
   {
-    CLog::Log(LOGERROR,
-              "CInputStreamAddon::{} - 'inputstreamaddon' has been deprecated, "
-              "please use `#KODIPROP:inputstream={}` instead",
-              __func__, oldAddonProp.asString());
+    CLog::LogF(
+        LOGERROR,
+        "'inputstreamaddon' has been deprecated, please use `#KODIPROP:inputstream={}` instead",
+        oldAddonProp.asString());
   }
 
   // check if a specific inputstream addon is requested
@@ -174,10 +174,8 @@ bool CInputStreamAddon::Open()
 
     if (props.m_nCountInfoValues >= STREAM_MAX_PROPERTY_COUNT)
     {
-      CLog::Log(LOGERROR,
-                "CInputStreamAddon::{} - Hit max count of stream properties, "
-                "have {}, actual count: {}",
-                __func__, STREAM_MAX_PROPERTY_COUNT, propsMap.size());
+      CLog::LogF(LOGERROR, "Hit max count of stream properties, have {}, actual count: {}",
+                 STREAM_MAX_PROPERTY_COUNT, propsMap.size());
       break;
     }
   }
@@ -499,6 +497,22 @@ KODI_HANDLE CInputStreamAddon::cb_get_stream_transfer(KODI_HANDLE handle,
     }
     //@}
 
+    // Dolby Vision DVCC metadata mapping
+    if (stream->m_dvccMetadata)
+    {
+      videoStream->dovi.dv_version_major = stream->m_dvccMetadata->m_dvVersionMajor;
+      videoStream->dovi.dv_version_minor = stream->m_dvccMetadata->m_dvVersionMinor;
+      videoStream->dovi.dv_profile = stream->m_dvccMetadata->m_dvProfile;
+      videoStream->dovi.dv_level = stream->m_dvccMetadata->m_dvLevel;
+      videoStream->dovi.rpu_present_flag = stream->m_dvccMetadata->m_rpuPresentFlag;
+      videoStream->dovi.el_present_flag = stream->m_dvccMetadata->m_elPresentFlag;
+      videoStream->dovi.bl_present_flag = stream->m_dvccMetadata->m_blPresentFlag;
+      videoStream->dovi.dv_bl_signal_compatibility_id =
+          stream->m_dvccMetadata->m_dvBlSignalCompatibilityId;
+      videoStream->dovi.dv_md_compression = stream->m_dvccMetadata->m_dvMdCompression;
+    }
+    //@}
+
     /*
     // Way to include part on new API version
     if (Addon()->GetTypeVersionDll(ADDON_TYPE::ADDON_INSTANCE_INPUTSTREAM) >= AddonVersion("3.0.0")) // Set the version to your new
@@ -690,12 +704,13 @@ void CInputStreamAddon::GetChapterName(std::string& name, int ch)
   }
 }
 
-int64_t CInputStreamAddon::GetChapterPos(int ch)
+std::chrono::milliseconds CInputStreamAddon::GetChapterPos(int ch)
 {
+  //! @todo add API for ms precision
   if (m_ifc.inputstream->toAddon->get_chapter_pos)
-    return m_ifc.inputstream->toAddon->get_chapter_pos(m_ifc.inputstream, ch);
+    return std::chrono::seconds{m_ifc.inputstream->toAddon->get_chapter_pos(m_ifc.inputstream, ch)};
 
-  return 0;
+  return std::chrono::milliseconds{0};
 }
 
 bool CInputStreamAddon::SeekChapter(int ch)

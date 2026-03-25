@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2005-2026 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -15,16 +15,18 @@
 #include "filesystem/SpecialProtocol.h"
 #include "network/DNSNameCache.h"
 #include "profiles/ProfileManager.h"
+#include "resources/LocalizeStrings.h"
+#include "resources/ResourcesComponent.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
 #include "settings/lib/SettingsManager.h"
 #include "utils/FileUtils.h"
 #include "utils/LangCodeExpander.h"
+#include "utils/Set.h"
 #include "utils/StringUtils.h"
 #include "utils/SystemInfo.h"
 #include "utils/URIUtils.h"
-#include "utils/Variant.h"
 #include "utils/XMLUtils.h"
 #include "utils/log.h"
 
@@ -50,13 +52,29 @@ bool ValidateVideoStackRegex(const CRegExp& regex)
   return true;
 };
 
-std::vector<CRegExp> CompileRegexesFromXML(TiXmlElement* folderStacking)
+std::vector<CRegExp> CompileRegexesFromXML(const TiXmlElement* folderStacking)
 {
   std::vector<std::string> patterns;
   CAdvancedSettings::GetCustomRegexps(folderStacking, patterns);
   return CompileRegexes(patterns);
 }
 
+void ParseDatabaseSettings(const TiXmlElement* element, DatabaseSettings& settings)
+{
+  XMLUtils::GetString(element, "type", settings.type);
+  XMLUtils::GetString(element, "host", settings.host);
+  XMLUtils::GetString(element, "port", settings.port);
+  XMLUtils::GetString(element, "user", settings.user);
+  XMLUtils::GetString(element, "pass", settings.pass);
+  XMLUtils::GetString(element, "name", settings.name);
+  XMLUtils::GetString(element, "key", settings.key);
+  XMLUtils::GetString(element, "cert", settings.cert);
+  XMLUtils::GetString(element, "ca", settings.ca);
+  XMLUtils::GetString(element, "capath", settings.capath);
+  XMLUtils::GetString(element, "ciphers", settings.ciphers);
+  XMLUtils::GetUInt(element, "connecttimeout", settings.connecttimeout, 1, 300);
+  XMLUtils::GetBoolean(element, "compression", settings.compression);
+}
 } // unnamed namespace
 
 void CAdvancedSettings::OnSettingsLoaded()
@@ -83,6 +101,16 @@ void CAdvancedSettings::OnSettingsLoaded()
     CLog::Log(LOGINFO, "Disabled debug logging due to GUI setting. Level {}.", m_logLevel);
   }
   CServiceBroker::GetLogging().SetLogLevel(m_logLevel);
+
+  std::vector<AdvancedSettingsCallback> callbacks;
+  {
+    std::lock_guard lock{m_listCritSection};
+    callbacks.reserve(m_settingsLoadedCallbacks.size());
+    std::ranges::transform(m_settingsLoadedCallbacks, std::back_inserter(callbacks),
+                           [](const auto& pair) { return pair.second; });
+  }
+  for (const auto& callback : callbacks)
+    callback();
 }
 
 void CAdvancedSettings::OnSettingsUnloaded()
@@ -98,6 +126,20 @@ void CAdvancedSettings::OnSettingChanged(const std::shared_ptr<const CSetting>& 
   const std::string &settingId = setting->GetId();
   if (settingId == CSettings::SETTING_DEBUG_SHOWLOGINFO)
     SetDebugMode(std::static_pointer_cast<const CSettingBool>(setting)->GetValue());
+}
+
+int CAdvancedSettings::RegisterSettingsLoadedCallback(AdvancedSettingsCallback callback)
+{
+  static int idx{0};
+  std::lock_guard lock{m_listCritSection};
+  m_settingsLoadedCallbacks.emplace(idx, std::move(callback));
+  return ++idx;
+}
+
+void CAdvancedSettings::UnregisterSettingsLoadedCallback(int handle)
+{
+  std::lock_guard lock{m_listCritSection};
+  m_settingsLoadedCallbacks.erase(handle);
 }
 
 void CAdvancedSettings::Initialize(CSettingsManager& settingsMgr)
@@ -137,6 +179,15 @@ void CAdvancedSettings::Uninitialize(CSettingsManager& settingsMgr)
 
   m_initialized = false;
 }
+
+namespace
+{
+std::string EscapeSpecialChars(const std::string& str)
+{
+  static const std::regex specialChars{R"([-[\]{}()*+?.,\^$|#\s])"};
+  return std::regex_replace(str, specialChars, R"(\$&)");
+}
+} // namespace
 
 void CAdvancedSettings::Initialize()
 {
@@ -260,13 +311,14 @@ void CAdvancedSettings::Initialize()
                                         m_allExcludeFromScanRegExps.end());
 
   m_folderStackRegExps = CompileRegexes({
-      "((cd|dvd|dis[ck])[0-9]+)$",
+      "^(.*?)[ _.-]*((?:cd|dvd|p(?:(?:ar)?t)|dis[ck])[ _.-]*[0-9])$",
+      "()((?:p(?:(?:ar)?t)[ _.-]*[0-9]))$",
   });
 
   m_videoStackRegExps = CompileRegexes({
-      "(.*?)([ _.-]*(?:cd|dvd|p(?:(?:ar)?t)|dis[ck])[ _.-]*[0-9]+)(.*?)(\\.[^.]+)$",
-      "(.*?)([ _.-]*(?:cd|dvd|p(?:(?:ar)?t)|dis[ck])[ _.-]*[a-d])(.*?)(\\.[^.]+)$",
-      "(.*?)([ ._-]*[a-d])(.*?)(\\.[^.]+)$",
+      "(.*?)([ _.-]*(?:cd|dvd|p(?:(?:ar)?t)|dis[ck]|file)[ _.-]*[0-9]+)(.*?)(\\.[^.]+)$",
+      "(.*?)([ _.-]*(?:cd|dvd|p(?:(?:ar)?t)|dis[ck])[ _.-]*[a-z])(.*?)(\\.[^.]+)$",
+      "^(.+)((?:[ ._-]|(?<=\\)))[a-z])()(\\.[^.]+)$",
       // This one is a bit too greedy to enable by default.  It will stack sequels
       // in a flat dir structure, but is perfectly safe in a dir-per-vid one.
       // "(.*?)([ ._-]*[0-9])(.*?)(\\.[^.]+)$",
@@ -299,6 +351,19 @@ void CAdvancedSettings::Initialize()
       "[\\\\/\\._ -]([0-9]+)([0-9][0-9](?:(?:[a-i]|\\.[1-9])(?![0-9]))?)([\\._ -][^\\\\/]*)$");
 
   m_tvshowMultiPartEnumRegExp = "^([-_ex]+)([0-9]+)(.*)";
+
+  // Build regex inserting local specific spelling of disc (xxx)
+  // [ _.-]*\((?:xxx|dis[ck])[ _.-]*\d{1,3}\)$
+  std::string localeDiscStr{CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(427)};
+  if (!localeDiscStr.empty())
+    localeDiscStr = EscapeSpecialChars(localeDiscStr) + "|";
+  m_titleTrailingPartNumberRegExp =
+      R"([ _.-]*\((?:)" + localeDiscStr + R"(dis[ck])[ _.-]*\d{1,3}\)$)";
+
+  // Build regex inserting local specific spelling of disc (xxx)
+  // \/?:cd|dvd|xxx|dis[ck][ _.-]*([0-9]+)$
+  m_trailingPartNumberRegExp =
+      R"([\\\/](?:cd|dvd|)" + localeDiscStr + R"(dis[ck])[ _.-]*(\d{1,3})$)";
 
   m_remoteDelay = 3;
   m_bScanIRServer = true;
@@ -410,6 +475,11 @@ void CAdvancedSettings::Initialize()
 
   m_cpuTempCmd = "";
   m_gpuTempCmd = "";
+
+  m_powerdownCommand = "";
+  m_rebootCommand = "";
+  m_suspendCommand = "";
+  m_hibernateCommand = "";
 #if defined(TARGET_DARWIN)
   // default for osx is fullscreen always on top
   m_alwaysOnTop = true;
@@ -425,8 +495,8 @@ void CAdvancedSettings::Initialize()
   m_iPVRNumericChannelSwitchTimeout = 2000;
   m_iPVRTimeshiftThreshold = 10;
   m_bPVRTimeshiftSimpleOSD = true;
-  m_PVRDefaultSortOrder.sortBy = SortByDate;
-  m_PVRDefaultSortOrder.sortOrder = SortOrderDescending;
+  m_PVRDefaultSortOrder.sortBy = SortBy::DATE;
+  m_PVRDefaultSortOrder.sortOrder = SortOrder::DESCENDING;
 
   m_addonPackageFolderSize = 200;
 
@@ -451,8 +521,10 @@ void CAdvancedSettings::Initialize()
       ".png|.jpg|.jpeg|.bmp|.gif|.ico|.tif|.tiff|.tga|.pcx|.cbz|.zip|.rss|.webp|.jp2|.apng|.avif|.heif|.heic";
   m_musicExtensions = ".b4s|.nsv|.m4a|.flac|.aac|.strm|.pls|.rm|.rma|.mpa|.wav|.wma|.ogg|.mp3|.mp2|.m3u|.gdm|.imf|.m15|.sfx|.uni|.ac3|.dts|.cue|.aif|.aiff|.wpl|.xspf|.ape|.mac|.mpc|.mp+|.mpp|.shn|.zip|.wv|.dsp|.xsp|.xwav|.waa|.wvs|.wam|.gcm|.idsp|.mpdsp|.mss|.spt|.rsd|.sap|.cmc|.cmr|.dmc|.mpt|.mpd|.rmt|.tmc|.tm8|.tm2|.oga|.url|.pxml|.tta|.rss|.wtv|.mka|.tak|.opus|.dff|.dsf|.m4b|.dtshd";
   m_videoExtensions = ".m4v|.3g2|.3gp|.nsv|.tp|.ts|.ty|.strm|.pls|.rm|.rmvb|.mpd|.m3u|.m3u8|.ifo|.mov|.qt|.divx|.xvid|.bivx|.vob|.nrg|.img|.iso|.udf|.pva|.wmv|.asf|.asx|.ogm|.m2v|.avi|.bin|.dat|.mpg|.mpeg|.mp4|.mkv|.mk3d|.avc|.vp3|.svq3|.nuv|.viv|.dv|.fli|.flv|.001|.wpl|.xspf|.zip|.vdr|.dvr-ms|.xsp|.mts|.m2t|.m2ts|.evo|.ogv|.sdp|.avs|.rec|.url|.pxml|.vc1|.h264|.rcv|.rss|.mpls|.mpl|.webm|.bdmv|.bdm|.wtv|.trp|.f4v";
-  m_subtitlesExtensions = ".utf|.utf8|.utf-8|.sub|.srt|.smi|.rt|.txt|.ssa|.text|.ssa|.aqt|.jss|"
-                          ".ass|.vtt|.idx|.ifo|.zip|.sup";
+  m_subtitlesExtensions = ".utf|.utf8|.utf-8|.sub|.srt|.smi|.rt|.txt|.ssa|.text|.ssa|.aqt|.jss|."
+                          "ass|.vtt|.idx|.ifo|.zip|.sup";
+  m_archiveExtensions = ".tgz|.tbz2|.xz|.7z|.bz2|.gz|.tar|.rar|.zip";
+  m_compoundArchiveExtensions = ".tar.bz2|.tar.gz|.tar.xz";
   m_discStubExtensions = ".disc";
   // internal music extensions
   m_musicExtensions += "|.cdda";
@@ -510,7 +582,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     return;
   }
 
-  TiXmlElement *pRootElement = advancedXML.RootElement();
+  const TiXmlElement* pRootElement = advancedXML.RootElement();
   if (!pRootElement || StringUtils::CompareNoCase(pRootElement->Value(), "advancedsettings") != 0)
   {
     CLog::Log(LOGERROR, "Error loading {}, no <advancedsettings> node", file);
@@ -553,14 +625,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
         passTag->LinkEndChild(new TiXmlText("*****"));
       }
     }
-    if (network->FirstChildElement("nfstimeout"))
-    {
-      XMLUtils::GetUInt(network, "nfstimeout", m_nfsTimeout, 0, 3600);
-    }
-    if (network->FirstChildElement("nfsretries"))
-    {
-      XMLUtils::GetInt(network, "nfsretries", m_nfsRetries, -1, 30);
-    }
   }
 
   // Dump contents of copied AS.xml to debug log
@@ -573,7 +637,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   CLog::Log(LOGINFO, "Contents of {} are...\n{}", file,
             std::regex_replace(printer.CStr(), redactRe, "$1USERNAME:PASSWORD@"));
 
-  TiXmlElement *pElement = pRootElement->FirstChildElement("audio");
+  const TiXmlElement* pElement = pRootElement->FirstChildElement("audio");
   if (pElement)
   {
     XMLUtils::GetString(pElement, "defaultplayer", m_audioDefaultPlayer);
@@ -591,7 +655,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetInt(pElement, "percentseekforwardbig", m_musicPercentSeekForwardBig, 0, 100);
     XMLUtils::GetInt(pElement, "percentseekbackwardbig", m_musicPercentSeekBackwardBig, -100, 0);
 
-    TiXmlElement* pAudioExcludes = pElement->FirstChildElement("excludefromlisting");
+    const TiXmlElement* pAudioExcludes = pElement->FirstChildElement("excludefromlisting");
     if (pAudioExcludes)
       GetCustomRegexps(pAudioExcludes, m_audioExcludeFromListingRegExps);
 
@@ -643,7 +707,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetInt(pElement, "percentseekforwardbig", m_videoPercentSeekForwardBig, 0, 100);
     XMLUtils::GetInt(pElement, "percentseekbackwardbig", m_videoPercentSeekBackwardBig, -100, 0);
 
-    TiXmlElement* pVideoExcludes = pElement->FirstChildElement("excludefromlisting");
+    const TiXmlElement* pVideoExcludes = pElement->FirstChildElement("excludefromlisting");
     if (pVideoExcludes)
       GetCustomRegexps(pVideoExcludes, m_videoExcludeFromListingRegExps);
 
@@ -670,10 +734,10 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetBoolean(pElement,"vdpauHDdeintSkipChroma",m_videoVDPAUdeintSkipChromaHD);
     XMLUtils::GetBoolean(pElement, "bypasscodecprofile", m_videoBypassCodecProfile);
 
-    TiXmlElement* pAdjustRefreshrate = pElement->FirstChildElement("adjustrefreshrate");
+    const TiXmlElement* pAdjustRefreshrate = pElement->FirstChildElement("adjustrefreshrate");
     if (pAdjustRefreshrate)
     {
-      TiXmlElement* pRefreshOverride = pAdjustRefreshrate->FirstChildElement("override");
+      const TiXmlElement* pRefreshOverride = pAdjustRefreshrate->FirstChildElement("override");
       while (pRefreshOverride)
       {
         RefreshOverride refreshOverride = {};
@@ -727,7 +791,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
         pRefreshOverride = pRefreshOverride->NextSiblingElement("override");
       }
 
-      TiXmlElement* pRefreshFallback = pAdjustRefreshrate->FirstChildElement("fallback");
+      const TiXmlElement* pRefreshFallback = pAdjustRefreshrate->FirstChildElement("fallback");
       while (pRefreshFallback)
       {
         RefreshOverride fallback = {};
@@ -769,11 +833,11 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetBoolean(pElement, "preferstereostream", m_videoPreferStereoStream);
 
     // Store global display latency settings
-    TiXmlElement* pVideoLatency = pElement->FirstChildElement("latency");
+    const TiXmlElement* pVideoLatency = pElement->FirstChildElement("latency");
     if (pVideoLatency)
     {
       float refresh, refreshmin, refreshmax;
-      TiXmlElement* pRefreshVideoLatency = pVideoLatency->FirstChildElement("refresh");
+      const TiXmlElement* pRefreshVideoLatency = pVideoLatency->FirstChildElement("refresh");
 
       while (pRefreshVideoLatency)
       {
@@ -824,12 +888,12 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetInt(pElement, "dateadded", m_iMusicLibraryDateAdded);
     XMLUtils::GetBoolean(pElement, "useisodates", m_bMusicLibraryUseISODates);
     XMLUtils::GetBoolean(pElement, "artistnavigatestosongs", m_bMusicLibraryArtistNavigatesToSongs);
-    //Music artist name separators
-    TiXmlElement* separators = pElement->FirstChildElement("artistseparators");
+    // Music artist name separators
+    const TiXmlElement* separators = pElement->FirstChildElement("artistseparators");
     if (separators)
     {
       m_musicArtistSeparators.clear();
-      TiXmlNode* separator = separators->FirstChild("separator");
+      const TiXmlNode* separator = separators->FirstChild("separator");
       while (separator)
       {
         if (separator->FirstChild())
@@ -886,6 +950,8 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetBoolean(pElement, "disableipv6", m_curlDisableIPV6);
     XMLUtils::GetBoolean(pElement, "disablehttp2", m_curlDisableHTTP2);
     XMLUtils::GetString(pElement, "catrustfile", m_caTrustFile);
+    XMLUtils::GetUInt(pElement, "nfstimeout", m_nfsTimeout, 0, 3600);
+    XMLUtils::GetInt(pElement, "nfsretries", m_nfsRetries, -1, 30);
   }
 
   pElement = pRootElement->FirstChildElement("jsonrpc");
@@ -988,7 +1054,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   }
 
   // picture exclude regexps
-  TiXmlElement* pPictureExcludes = pRootElement->FirstChildElement("pictureexcludes");
+  const TiXmlElement* pPictureExcludes = pRootElement->FirstChildElement("pictureexcludes");
   if (pPictureExcludes)
     GetCustomRegexps(pPictureExcludes, m_pictureExcludeFromListingRegExps);
 
@@ -1025,7 +1091,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   g_LangCodeExpander.LoadUserCodes(pRootElement->FirstChildElement("languagecodes"));
 
   // trailer matching regexps
-  TiXmlElement* pTrailerMatching = pRootElement->FirstChildElement("trailermatching");
+  const TiXmlElement* pTrailerMatching = pRootElement->FirstChildElement("trailermatching");
   if (pTrailerMatching)
     GetCustomRegexps(pTrailerMatching, m_trailerMatchRegExps);
 
@@ -1035,7 +1101,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
                                         m_trailerMatchRegExps.end());
 
   // video stacking regexps
-  TiXmlElement* videoStacking = pRootElement->FirstChildElement("moviestacking");
+  const TiXmlElement* videoStacking = pRootElement->FirstChildElement("moviestacking");
   if (videoStacking)
   {
     std::vector<CRegExp> regexes = CompileRegexesFromXML(videoStacking);
@@ -1044,7 +1110,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   }
 
   // folder stacking regexps
-  TiXmlElement* folderStacking = pRootElement->FirstChildElement("folderstacking");
+  const TiXmlElement* folderStacking = pRootElement->FirstChildElement("folderstacking");
   if (folderStacking)
   {
     std::vector<CRegExp> regexes = CompileRegexesFromXML(folderStacking);
@@ -1052,7 +1118,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   }
 
   //tv stacking regexps
-  TiXmlElement* pTVStacking = pRootElement->FirstChildElement("tvshowmatching");
+  const TiXmlElement* pTVStacking = pRootElement->FirstChildElement("tvshowmatching");
   if (pTVStacking)
     GetCustomTVRegexps(pTVStacking, m_tvshowEnumRegExps);
 
@@ -1149,6 +1215,15 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   XMLUtils::GetString(pRootElement, "cputempcommand", m_cpuTempCmd);
   XMLUtils::GetString(pRootElement, "gputempcommand", m_gpuTempCmd);
 
+  const TiXmlElement* pPowerManagement = pRootElement->FirstChildElement("powermanagement");
+  if (pPowerManagement)
+  {
+    XMLUtils::GetString(pPowerManagement, "powerdown", m_powerdownCommand);
+    XMLUtils::GetString(pPowerManagement, "reboot", m_rebootCommand);
+    XMLUtils::GetString(pPowerManagement, "suspend", m_suspendCommand);
+    XMLUtils::GetString(pPowerManagement, "hibernate", m_hibernateCommand);
+  }
+
   XMLUtils::GetBoolean(pRootElement, "alwaysontop", m_alwaysOnTop);
 
   const TiXmlElement* pPVR = pRootElement->FirstChildElement("pvr");
@@ -1165,101 +1240,48 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     const TiXmlElement* pSortDecription = pPVR->FirstChildElement("pvrrecordings");
     if (pSortDecription)
     {
-      const char* XML_SORTMETHOD = "sortmethod";
-      const char* XML_SORTORDER = "sortorder";
-      int sortMethod;
-      // ignore SortByTime for duration defaults
-      if (XMLUtils::GetInt(pSortDecription, XML_SORTMETHOD, sortMethod, SortByLabel, SortByFile))
+      constexpr const char* XML_SORTMETHOD = "sortmethod";
+      auto sortMethod = static_cast<int>(SortBy::NONE);
+      static constexpr CSet validSortMethods{SortBy::LABEL,          SortBy::DATE,
+                                             SortBy::SIZE,           SortBy::FILE,
+                                             SortBy::EPISODE_NUMBER, SortBy::PROVIDER};
+      XMLUtils::GetInt(pSortDecription, XML_SORTMETHOD, sortMethod, static_cast<int>(SortBy::NONE),
+                       static_cast<int>(SortBy::USER_PREFERENCE));
+      if (validSortMethods.contains(static_cast<SortBy>(sortMethod)))
       {
         int sortOrder;
-        if (XMLUtils::GetInt(pSortDecription, XML_SORTORDER, sortOrder, SortOrderAscending,
-                             SortOrderDescending))
+        constexpr const char* XML_SORTORDER = "sortorder";
+        if (XMLUtils::GetInt(pSortDecription, XML_SORTORDER, sortOrder,
+                             static_cast<int>(SortOrder::ASCENDING),
+                             static_cast<int>(SortOrder::DESCENDING)))
         {
-          m_PVRDefaultSortOrder.sortBy = (SortBy)sortMethod;
-          m_PVRDefaultSortOrder.sortOrder = (SortOrder)sortOrder;
+          m_PVRDefaultSortOrder.sortBy = static_cast<SortBy>(sortMethod);
+          m_PVRDefaultSortOrder.sortOrder = static_cast<SortOrder>(sortOrder);
         }
       }
     }
   }
 
-  const TiXmlElement* pDatabase = pRootElement->FirstChildElement("videodatabase");
-  if (pDatabase)
+  if (const TiXmlElement* dbElement = pRootElement->FirstChildElement("videodatabase");
+      dbElement != nullptr)
   {
     CLog::Log(LOGWARNING, "VIDEO database configuration is experimental.");
-    XMLUtils::GetString(pDatabase, "type", m_databaseVideo.type);
-    XMLUtils::GetString(pDatabase, "host", m_databaseVideo.host);
-    XMLUtils::GetString(pDatabase, "port", m_databaseVideo.port);
-    XMLUtils::GetString(pDatabase, "user", m_databaseVideo.user);
-    XMLUtils::GetString(pDatabase, "pass", m_databaseVideo.pass);
-    XMLUtils::GetString(pDatabase, "name", m_databaseVideo.name);
-    XMLUtils::GetString(pDatabase, "key", m_databaseVideo.key);
-    XMLUtils::GetString(pDatabase, "cert", m_databaseVideo.cert);
-    XMLUtils::GetString(pDatabase, "ca", m_databaseVideo.ca);
-    XMLUtils::GetString(pDatabase, "capath", m_databaseVideo.capath);
-    XMLUtils::GetString(pDatabase, "ciphers", m_databaseVideo.ciphers);
-    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseVideo.connecttimeout, 1, 300);
-    XMLUtils::GetBoolean(pDatabase, "compression", m_databaseVideo.compression);
+    ParseDatabaseSettings(dbElement, m_databaseVideo);
   }
 
-  pDatabase = pRootElement->FirstChildElement("musicdatabase");
-  if (pDatabase)
-  {
-    XMLUtils::GetString(pDatabase, "type", m_databaseMusic.type);
-    XMLUtils::GetString(pDatabase, "host", m_databaseMusic.host);
-    XMLUtils::GetString(pDatabase, "port", m_databaseMusic.port);
-    XMLUtils::GetString(pDatabase, "user", m_databaseMusic.user);
-    XMLUtils::GetString(pDatabase, "pass", m_databaseMusic.pass);
-    XMLUtils::GetString(pDatabase, "name", m_databaseMusic.name);
-    XMLUtils::GetString(pDatabase, "key", m_databaseMusic.key);
-    XMLUtils::GetString(pDatabase, "cert", m_databaseMusic.cert);
-    XMLUtils::GetString(pDatabase, "ca", m_databaseMusic.ca);
-    XMLUtils::GetString(pDatabase, "capath", m_databaseMusic.capath);
-    XMLUtils::GetString(pDatabase, "ciphers", m_databaseMusic.ciphers);
-    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseMusic.connecttimeout, 1, 300);
-    XMLUtils::GetBoolean(pDatabase, "compression", m_databaseMusic.compression);
-  }
+  if (const TiXmlElement* dbElement = pRootElement->FirstChildElement("musicdatabase");
+      dbElement != nullptr)
+    ParseDatabaseSettings(dbElement, m_databaseMusic);
 
-  pDatabase = pRootElement->FirstChildElement("tvdatabase");
-  if (pDatabase)
-  {
-    XMLUtils::GetString(pDatabase, "type", m_databaseTV.type);
-    XMLUtils::GetString(pDatabase, "host", m_databaseTV.host);
-    XMLUtils::GetString(pDatabase, "port", m_databaseTV.port);
-    XMLUtils::GetString(pDatabase, "user", m_databaseTV.user);
-    XMLUtils::GetString(pDatabase, "pass", m_databaseTV.pass);
-    XMLUtils::GetString(pDatabase, "name", m_databaseTV.name);
-    XMLUtils::GetString(pDatabase, "key", m_databaseTV.key);
-    XMLUtils::GetString(pDatabase, "cert", m_databaseTV.cert);
-    XMLUtils::GetString(pDatabase, "ca", m_databaseTV.ca);
-    XMLUtils::GetString(pDatabase, "capath", m_databaseTV.capath);
-    XMLUtils::GetString(pDatabase, "ciphers", m_databaseTV.ciphers);
-    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseTV.connecttimeout, 1, 300);
-    XMLUtils::GetBoolean(pDatabase, "compression", m_databaseTV.compression);
-  }
+  if (const TiXmlElement* dbElement = pRootElement->FirstChildElement("tvdatabase");
+      dbElement != nullptr)
+    ParseDatabaseSettings(dbElement, m_databaseTV);
 
-  pDatabase = pRootElement->FirstChildElement("epgdatabase");
-  if (pDatabase)
-  {
-    XMLUtils::GetString(pDatabase, "type", m_databaseEpg.type);
-    XMLUtils::GetString(pDatabase, "host", m_databaseEpg.host);
-    XMLUtils::GetString(pDatabase, "port", m_databaseEpg.port);
-    XMLUtils::GetString(pDatabase, "user", m_databaseEpg.user);
-    XMLUtils::GetString(pDatabase, "pass", m_databaseEpg.pass);
-    XMLUtils::GetString(pDatabase, "name", m_databaseEpg.name);
-    XMLUtils::GetString(pDatabase, "key", m_databaseEpg.key);
-    XMLUtils::GetString(pDatabase, "cert", m_databaseEpg.cert);
-    XMLUtils::GetString(pDatabase, "ca", m_databaseEpg.ca);
-    XMLUtils::GetString(pDatabase, "capath", m_databaseEpg.capath);
-    XMLUtils::GetString(pDatabase, "ciphers", m_databaseEpg.ciphers);
-    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseEpg.connecttimeout, 1, 300);
-    XMLUtils::GetBoolean(pDatabase, "compression", m_databaseEpg.compression);
-  }
+  if (const TiXmlElement* dbElement = pRootElement->FirstChildElement("epgdatabase");
+      dbElement != nullptr)
+    ParseDatabaseSettings(dbElement, m_databaseEpg);
 
-  pElement = pRootElement->FirstChildElement("enablemultimediakeys");
-  if (pElement)
-  {
-    XMLUtils::GetBoolean(pRootElement, "enablemultimediakeys", m_enableMultimediaKeys);
-  }
+  XMLUtils::GetBoolean(pRootElement, "enablemultimediakeys", m_enableMultimediaKeys);
 
   pElement = pRootElement->FirstChildElement("gui");
   if (pElement)
@@ -1311,9 +1333,10 @@ void CAdvancedSettings::Clear()
   m_userAgent.clear();
 }
 
-void CAdvancedSettings::GetCustomTVRegexps(TiXmlElement *pRootElement, SETTINGS_TVSHOWLIST& settings)
+void CAdvancedSettings::GetCustomTVRegexps(const TiXmlElement* pRootElement,
+                                           SETTINGS_TVSHOWLIST& settings)
 {
-  TiXmlElement *pElement = pRootElement;
+  const TiXmlElement* pElement = pRootElement;
   while (pElement)
   {
     int iAction = 0; // overwrite
@@ -1333,7 +1356,7 @@ void CAdvancedSettings::GetCustomTVRegexps(TiXmlElement *pRootElement, SETTINGS_
     }
     if (iAction == 0)
       settings.clear();
-    TiXmlNode* pRegExp = pElement->FirstChild("regexp");
+    const TiXmlNode* pRegExp = pElement->FirstChild("regexp");
     int i = 0;
     while (pRegExp)
     {
@@ -1376,9 +1399,10 @@ void CAdvancedSettings::GetCustomTVRegexps(TiXmlElement *pRootElement, SETTINGS_
   }
 }
 
-void CAdvancedSettings::GetCustomRegexps(TiXmlElement *pRootElement, std::vector<std::string>& settings)
+void CAdvancedSettings::GetCustomRegexps(const TiXmlElement* pRootElement,
+                                         std::vector<std::string>& settings)
 {
-  TiXmlElement *pElement = pRootElement;
+  const TiXmlElement* pElement = pRootElement;
   while (pElement)
   {
     int iAction = 0; // overwrite
@@ -1398,7 +1422,7 @@ void CAdvancedSettings::GetCustomRegexps(TiXmlElement *pRootElement, std::vector
     }
     if (iAction == 0)
       settings.clear();
-    TiXmlNode* pRegExp = pElement->FirstChild("regexp");
+    const TiXmlNode* pRegExp = pElement->FirstChild("regexp");
     int i = 0;
     while (pRegExp)
     {
