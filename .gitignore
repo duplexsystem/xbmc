@@ -268,3 +268,21 @@ exclude_dll.txt
 
 # clangd index
 .cache/
+
+compile_commands.json
+
+launch-c
+
+launch-cxx
+
+Makefile
+
+CMakeDoxygenDefaults.cmake
+
+_deps/
+
+CMakeDoxyfile.in
+
+CLAUDE.md
+
+.claude/

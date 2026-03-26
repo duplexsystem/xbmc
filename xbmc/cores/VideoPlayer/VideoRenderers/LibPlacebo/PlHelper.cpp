@@ -8,9 +8,14 @@
 
 #include "PlHelper.h"
 
-#include "rendering/dx/RenderContext.h"
+#include "utils/log.h"
 
+#if defined(HAS_DX)
+#include "rendering/dx/RenderContext.h"
 #include <mfobjects.h>
+#else
+#include <EGL/egl.h>
+#endif
 
 static void pl_log_cb(void*, enum pl_log_level level, const char* msg)
 {
@@ -46,13 +51,18 @@ std::shared_ptr<PL::PLInstance> PL::PLInstance::Get()
 }
 
 PL::PLInstance::PLInstance()
-  : m_plD3d11(nullptr),
-    m_plLog(nullptr),
-    m_plRenderer(nullptr),
+  : m_plLog(nullptr),
+#if defined(HAS_DX)
+    m_plD3d11(nullptr),
     m_plSwapchain(nullptr),
+#else
+    m_plGl(nullptr),
+#endif
+    m_plGpu(nullptr),
+    m_plRenderer(nullptr),
     CurrentPrim(0),
-    CurrentMatrix(0),
-    Currenttransfer(0)
+    Currenttransfer(0),
+    CurrentMatrix(0)
 {
 }
 
@@ -60,10 +70,14 @@ PL::PLInstance::~PLInstance() = default;
 
 bool PL::PLInstance::Init()
 {
+  if (m_isInitialized)
+    return true;
+
   pl_log_params log_param{};
   log_param.log_cb = pl_log_cb;
   log_param.log_level = PL_LOG_DEBUG;
   m_plLog = pl_log_create(PL_API_VER, &log_param);
+#if defined(HAS_DX)
   //d3d device
   pl_d3d11_params d3d_param{};
   d3d_param.device = DX::DeviceResources::Get()->GetD3DDevice();
@@ -80,6 +94,7 @@ bool PL::PLInstance::Init()
   m_plD3d11 = pl_d3d11_create(m_plLog, &d3d_param);
   if (!m_plD3d11)
     return false;
+  m_plGpu = m_plD3d11->gpu;
   //swap chain
   pl_d3d11_swapchain_params swapchain_param{};
   swapchain_param.swapchain = DX::DeviceResources::Get()->GetSwapChain();
@@ -87,8 +102,20 @@ bool PL::PLInstance::Init()
   m_plSwapchain = pl_d3d11_create_swapchain(m_plD3d11, &swapchain_param);
   if (!m_plSwapchain)
     return false;
+#else
+  pl_opengl_params gl_params = pl_opengl_default_params;
+  gl_params.egl_display = eglGetCurrentDisplay();
+  gl_params.egl_context = eglGetCurrentContext();
+  m_plGl = pl_opengl_create(m_plLog, &gl_params);
+  if (!m_plGl)
+  {
+    CLog::Log(LOGERROR, "PLInstance::Init - failed to create libplacebo OpenGL context");
+    return false;
+  }
+  m_plGpu = m_plGl->gpu;
+#endif
 
-  m_plRenderer = pl_renderer_create(m_plLog, m_plD3d11->gpu);
+  m_plRenderer = pl_renderer_create(m_plLog, m_plGpu);
   m_isInitialized = true;
   return true;
 
@@ -98,8 +125,13 @@ void PL::PLInstance::Reset()
   if (m_isInitialized)
   {
     pl_renderer_destroy(&m_plRenderer);
+#if defined(HAS_DX)
     pl_swapchain_destroy(&m_plSwapchain);
     pl_d3d11_destroy(&m_plD3d11);
+#else
+    if (m_plGl)
+      pl_opengl_destroy(&m_plGl);
+#endif
     pl_log_destroy(&m_plLog);
     m_isInitialized = false;
   }
@@ -194,6 +226,7 @@ const char* PL::PLInstance::pl_color_system_short_name(pl_color_system sys) {
 
 
 
+#if defined(HAS_DX)
 void PL::PLInstance::fill_d3d_format(pl_d3d_format* info, DXGI_FORMAT format)
 {
   memset(info, 0, sizeof(pl_d3d_format));
@@ -326,6 +359,8 @@ void PL::PLInstance::fill_d3d_format(pl_d3d_format* info, DXGI_FORMAT format)
     break;
   }
 }
+#endif // HAS_DX
+
 
 /*Settings conversion*/
 const pl_tone_map_function* PL::PLInstance::GetToneMappingFunction(pl_tone_mapping method)

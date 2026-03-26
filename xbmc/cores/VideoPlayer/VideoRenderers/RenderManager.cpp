@@ -466,22 +466,38 @@ void CRenderManager::CreateRenderer()
 {
   if (!m_pRenderer)
   {
-    CVideoBuffer *buffer = nullptr;
+    CVideoBuffer* buffer = nullptr;
     if (m_pConfigPicture)
       buffer = m_pConfigPicture->videoBuffer;
 
-    auto renderers = VIDEOPLAYER::CRendererFactory::GetRenderers();
-    for (auto &id : renderers)
-    {
-      if (id == "default")
-        continue;
+    int renderMethod = CServiceBroker::GetSettingsComponent()
+                           ->GetSettings()
+                           ->GetInt(CSettings::SETTING_VIDEOPLAYER_RENDERMETHOD);
 
-      m_pRenderer = VIDEOPLAYER::CRendererFactory::CreateRenderer(id, buffer);
+    if (renderMethod == RENDER_METHOD_LIBPLACEBO)
+    {
+      // Explicit request: try libplacebo only, fall back with warning on failure
+      m_pRenderer = VIDEOPLAYER::CRendererFactory::CreateRenderer("libplacebo", buffer);
       if (m_pRenderer)
-      {
         return;
+      CLog::Log(LOGWARNING,
+                "CRenderManager: libplacebo renderer requested but failed to init, falling back to "
+                "default");
+    }
+    else if (renderMethod == RENDER_METHOD_AUTO)
+    {
+      // Auto: try all non-default renderers in registration order
+      auto renderers = VIDEOPLAYER::CRendererFactory::GetRenderers();
+      for (auto& id : renderers)
+      {
+        if (id == "default")
+          continue;
+        m_pRenderer = VIDEOPLAYER::CRendererFactory::CreateRenderer(id, buffer);
+        if (m_pRenderer)
+          return;
       }
     }
+    // Any other method (GLSL, SOFTWARE, etc.) or fallback: use legacy renderer
     m_pRenderer = VIDEOPLAYER::CRendererFactory::CreateRenderer("default", buffer);
   }
 }

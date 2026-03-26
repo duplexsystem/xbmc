@@ -23,6 +23,11 @@ extern "C" {
 #include <libavutil/mastering_display_metadata.h>
 }
 
+#if defined(HAS_LIBPLACEBO)
+#define PL_LIBAV_IMPLEMENTATION 0
+#include <libplacebo/colorspace.h>
+#endif
+
 class CRenderCapture;
 class CRenderSystemGL;
 
@@ -94,7 +99,7 @@ protected:
   virtual bool ValidateRenderTarget();
   virtual void LoadShaders(int field=FIELD_FULL);
   void SetTextureFilter(GLenum method);
-  void UpdateVideoFilter();
+  virtual void UpdateVideoFilter();
   void CheckVideoParameters(int index);
   AVColorPrimaries GetSrcPrimaries(AVColorPrimaries srcPrimaries, unsigned int width, unsigned int height);
 
@@ -203,6 +208,15 @@ protected:
     AVMasteringDisplayMetadata displayMetadata;
     bool hasLightMetadata = false;
     AVContentLightMetadata lightMetadata;
+
+    double pts{0.0};
+    unsigned int iFlags{0};
+
+#if defined(HAS_LIBPLACEBO)
+    pl_color_space plColorSpace{};
+    pl_color_repr plColorRepr{};
+    pl_dovi_metadata plDoviMetadata{};
+#endif
   };
 
   // YV12 decoder textures

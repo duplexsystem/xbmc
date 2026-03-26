@@ -18,6 +18,9 @@
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
+#if defined(HAS_LIBPLACEBO)
+#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/RendererPLGLES.h"
+#endif
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "rendering/gles/ScreenshotSurfaceGLES.h"
 #include "utils/BufferObjectFactory.h"
@@ -57,6 +60,9 @@ bool CWinSystemGbmGLESContext::InitWindowSystem()
   VIDEOPLAYER::CRendererFactory::ClearRenderer();
   CDVDFactoryCodec::ClearHWAccels();
   CLinuxRendererGLES::Register();
+#if defined(HAS_LIBPLACEBO)
+  CRendererPLGLES::Register();
+#endif
   RETRO::CRPProcessInfoGbm::Register();
   RETRO::CRPProcessInfoGbm::RegisterRendererFactory(new RETRO::CRendererFactoryDMAOpenGLES);
   RETRO::CRPProcessInfoGbm::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGLES);

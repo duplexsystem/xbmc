@@ -1132,6 +1132,7 @@ bool CDVDVideoCodecFFmpeg::GetPictureCommon(VideoPicture* pVideoPicture)
     pVideoPicture->hasLightMetadata = true;
   }
 
+#if defined(HAS_LIBPLACEBO)
   //set to 0 hdr data in case ww dont have it
   memset(&pVideoPicture->plColorSpace, 0, sizeof(pl_color_space));
   memset(&pVideoPicture->plColorRepr, 0, sizeof(pl_color_repr));
@@ -1198,6 +1199,7 @@ bool CDVDVideoCodecFFmpeg::GetPictureCommon(VideoPicture* pVideoPicture)
   {
     pl_hdr_metadata_from_dovi_rpu(&pVideoPicture->plColorSpace.hdr, sd->buf->data, sd->buf->size);
   }
+#endif // HAS_LIBPLACEBO
   if (pVideoPicture->iRepeatPicture)
     pVideoPicture->dts = DVD_NOPTS_VALUE;
   else

@@ -23,11 +23,13 @@ extern "C" {
 #include <vector>
 #include <string>
 #include <map>
+#if defined(HAS_LIBPLACEBO)
 #define PL_LIBAV_IMPLEMENTATION 0
 #include "libplacebo/colorspace.h"
 
 #include <libplacebo/utils/dolbyvision.h>
 #include <libplacebo/utils/libav.h>
+#endif
 
 class CSetting;
 
@@ -81,9 +83,11 @@ public:
   bool hasLightMetadata = false;
   AVContentLightMetadata lightMetadata;
 
+#if defined(HAS_LIBPLACEBO)
   pl_color_space plColorSpace;
   pl_color_repr plColorRepr;
   pl_dovi_metadata plDoviMetadata;
+#endif
 
   AVPixelFormat pixelFormat; //< source pixel format
 

@@ -15,6 +15,9 @@
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
+#if defined(HAS_LIBPLACEBO)
+#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/RendererPLGLES.h"
+#endif
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "rendering/gles/ScreenshotSurfaceGLES.h"
 #include "utils/BufferObjectFactory.h"
@@ -46,6 +49,9 @@ bool CWinSystemWaylandEGLContextGLES::InitWindowSystem()
 
   CDVDVideoCodecDRMPRIME::Register();
   CRendererDRMPRIMEGLES::Register();
+#if defined(HAS_LIBPLACEBO)
+  CRendererPLGLES::Register();
+#endif
 
   RETRO::CRPProcessInfo::RegisterRendererFactory(new RETRO::CRendererFactoryDMAOpenGLES);
   RETRO::CRPProcessInfo::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGLES);

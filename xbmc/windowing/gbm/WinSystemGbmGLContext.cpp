@@ -14,6 +14,9 @@
 #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererOpenGL.h"
 #include "cores/VideoPlayer/DVDCodecs/DVDFactoryCodec.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGL.h"
+#if defined(HAS_LIBPLACEBO)
+#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/RendererPLGL.h"
+#endif
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "rendering/gl/ScreenshotSurfaceGL.h"
 #include "utils/BufferObjectFactory.h"
@@ -53,6 +56,9 @@ bool CWinSystemGbmGLContext::InitWindowSystem()
   VIDEOPLAYER::CRendererFactory::ClearRenderer();
   CDVDFactoryCodec::ClearHWAccels();
   CLinuxRendererGL::Register();
+#if defined(HAS_LIBPLACEBO)
+  CRendererPLGL::Register();
+#endif
   RETRO::CRPProcessInfoGbm::Register();
   RETRO::CRPProcessInfoGbm::RegisterRendererFactory(new RETRO::CRendererFactoryDMAOpenGL);
   RETRO::CRPProcessInfoGbm::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGL);

@@ -522,10 +522,13 @@ void CBaseRenderer::SettingOptionsRenderMethodsFiller(
   list.emplace_back(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(13416),
                     RENDER_METHOD_AUTO);
 
-#ifdef HAS_DX
+#if defined(HAS_LIBPLACEBO)
   list.push_back(
       IntegerSettingOption(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(16331),
                            RENDER_METHOD_LIBPLACEBO));
+#endif
+
+#ifdef HAS_DX
   list.push_back(IntegerSettingOption(
       CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(16319), RENDER_METHOD_DXVA));
   list.push_back(

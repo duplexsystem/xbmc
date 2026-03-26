@@ -14,6 +14,13 @@
 
 #include "system_gl.h"
 
+// GL_OES_EGL_image_external (0x8D65) is only in <GLES2/gl2ext.h>,
+// not in <GL/glext.h>; define it portably so this header works in
+// both desktop-GL and GLES translation units.
+#ifndef GL_TEXTURE_EXTERNAL_OES
+#define GL_TEXTURE_EXTERNAL_OES 0x8D65
+#endif
+
 class CDRMPRIMETexture
 {
 public:

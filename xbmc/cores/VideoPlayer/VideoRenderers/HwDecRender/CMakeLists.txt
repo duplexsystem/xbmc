@@ -56,11 +56,15 @@ if("gbm" IN_LIST CORE_PLATFORM_NAME_LC OR "wayland" IN_LIST CORE_PLATFORM_NAME_L
                         VideoLayerBridgeDRMPRIME.h)
   endif()
 
+  # DRMPRIMEEGL is needed by both the GLES DRMPRIME renderer and the
+  # libplacebo GL renderer (Wayland+GL can also receive DRM-PRIME buffers).
+  if(TARGET ${APP_NAME_LC}::EGL)
+    list(APPEND SOURCES DRMPRIMEEGL.cpp)
+    list(APPEND HEADERS DRMPRIMEEGL.h)
+  endif()
   if(TARGET ${APP_NAME_LC}::OpenGLES)
-    list(APPEND SOURCES RendererDRMPRIMEGLES.cpp
-                        DRMPRIMEEGL.cpp)
-    list(APPEND HEADERS RendererDRMPRIMEGLES.h
-                        DRMPRIMEEGL.h)
+    list(APPEND SOURCES RendererDRMPRIMEGLES.cpp)
+    list(APPEND HEADERS RendererDRMPRIMEGLES.h)
   endif()
 endif()
 
