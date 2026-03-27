@@ -246,28 +246,12 @@ bool CRendererPLGL::MapCallback(pl_gpu /*gpu*/, pl_tex* /*tex*/,
   // pl_queue sets out->field after map() returns based on first_field splitting.
   out->field = PL_FIELD_NONE;
 
-  // Normalize flipped planes (VAAPI stores textures bottom-first, so flipped=true).
-  // For field-based deinterlacing (YADIF), the flip must be expressed as an inverted
-  // crop instead: pl_queue assigns out->field after map() returns, and YADIF's even/odd
-  // row selection is in image space. With flipped=true, YADIF would invert field order
-  // (top-field rows map to odd texture rows instead of even), producing an upside-down
-  // image. Replacing flipped=true with crop {0,h,w,0} is visually identical but lets
-  // YADIF address fields correctly in image space.
-  bool wasFlipped = false;
-  for (int n = 0; n < out->num_planes; ++n)
-  {
-    if (out->planes[n].flipped)
-    {
-      out->planes[n].flipped = false;
-      wasFlipped = true;
-    }
-  }
-  if (wasFlipped && plbuf.tex[0])
-  {
-    const float w = static_cast<float>(plbuf.tex[0]->params.w);
-    const float h = static_cast<float>(plbuf.tex[0]->params.h);
-    out->crop = {0.0f, h, w, 0.0f};
-  }
+  // Leave planes[n].flipped as set by UploadTexture (true for VAAPI EGLImage DMA-buf
+  // imports where DMA-buf row 0 = top of video but GL texcoord t=0 = bottom).
+  // libplacebo's pass_align_planes inverts the sampling rect for flipped planes, giving
+  // correct orientation. The frame crop stays at zero so fix_refs_and_rects expands it
+  // to {0,0,w,h} (non-inverted), keeping flipped_y=false and avoiding a spurious output
+  // flip that would double-invert the already-corrected image.
 
   return true;
 }
@@ -420,7 +404,6 @@ bool CRendererPLGL::LoadShadersHook()
 
 bool CRendererPLGL::CreateTexture(int index)
 {
-  // Nothing to allocate here: pl_tex objects are created on first UploadTexture
   CPictureBuffer& buf = m_buffers[index];
   YuvImage& im = buf.image;
   memset(&im, 0, sizeof(im));
@@ -428,14 +411,25 @@ bool CRendererPLGL::CreateTexture(int index)
   im.width = m_sourceWidth;
   im.cshift_x = 1;
   im.cshift_y = 1;
-  // Give the plane a non-zero id so ValidateRenderer passes
-  buf.fields[FIELD_FULL][0].id = 1;
+
+  // Generate a real dummy texture so ValidateRenderer passes safely.
+  // Hardcoding this to 1 causes Kodi to delete the GUI's primary textures
+  GLuint dummyTex = 0;
+  glGenTextures(1, &dummyTex);
+  buf.fields[FIELD_FULL][0].id = dummyTex;
+
   return true;
 }
 
 void CRendererPLGL::DeleteTexture(int index)
 {
   ReleasePLBuffer(index);
+
+  // Safely delete the dummy texture
+  GLuint dummyTex = m_buffers[index].fields[FIELD_FULL][0].id;
+  if (dummyTex > 0)
+    glDeleteTextures(1, &dummyTex);
+
   m_buffers[index].fields[FIELD_FULL][0].id = 0;
 }
 
@@ -848,6 +842,11 @@ bool CRendererPLGL::UploadTexture(int index)
       CLog::Log(LOGERROR, "CRendererPLGL::UploadTexture - pl_upload_plane failed for plane {}", n);
       return false;
     }
+
+    // Explicitly tag the uploaded software plane as flipped.
+    // OpenGL's coordinate system is bottom-up, so top-down memory uploads
+    // are physically inverted in the GL texture.
+    plbuf.planes[n].flipped = true;
   }
 
   // --- Color metadata ---
