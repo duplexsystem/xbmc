@@ -93,6 +93,11 @@ CRendererPLGL::~CRendererPLGL()
 {
   for (int i = 0; i < NUM_BUFFERS; ++i)
     ReleasePLBuffer(i);
+  if (m_plQueue)
+  {
+    pl_queue_destroy(&m_plQueue);
+    m_plQueue = nullptr;
+  }
   pl_options_free(&m_plOpts);
   PL::PLInstance::Get()->Reset();
 }
@@ -137,6 +142,14 @@ bool CRendererPLGL::Configure(const VideoPicture& picture, float fps, unsigned i
       dt.Init(eglDpy);
   }
 
+  if (!m_plQueue)
+  {
+    m_plQueue = pl_queue_create(PL::PLInstance::Get()->GetGpu());
+    if (!m_plQueue)
+      CLog::Log(LOGERROR, "CRendererPLGL::Configure - pl_queue_create failed");
+  }
+  m_queuePtsOffsetSet = false;
+
   return true;
 }
 
@@ -145,6 +158,129 @@ bool CRendererPLGL::ConfigChanged(const VideoPicture& picture)
   if (picture.videoBuffer->GetFormat() != m_format)
     return true;
   return false;
+}
+
+bool CRendererPLGL::Flush(bool saveBuffers)
+{
+  if (m_plQueue)
+  {
+    pl_queue_reset(m_plQueue);
+    m_queuePtsOffsetSet = false;
+  }
+  return CLinuxRendererGL::Flush(saveBuffers);
+}
+
+void CRendererPLGL::AddVideoPicture(const VideoPicture& picture, int index)
+{
+  CLinuxRendererGL::AddVideoPicture(picture, index);
+
+  // Reset loaded flag so UploadTexture re-uploads for the new frame assigned to this slot.
+  m_plBuffers[index].loaded = false;
+
+  if (!m_plQueue || m_fps <= 0.0f)
+    return;
+
+  if (!m_queuePtsOffsetSet)
+  {
+    m_queuePtsOffset = picture.pts;
+    m_queuePtsOffsetSet = true;
+  }
+
+  auto* qf = new QueuedFrameState{index, this};
+
+  pl_source_frame src{};
+  src.pts = picture.pts - m_queuePtsOffset;
+  src.duration = 1.0 / static_cast<double>(m_fps);
+  if (picture.iFlags & DVP_FLAG_INTERLACED)
+    src.first_field =
+        (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
+  src.frame_data = qf;
+  src.map = &CRendererPLGL::MapCallback;
+  src.unmap = &CRendererPLGL::UnmapCallback;
+  src.discard = &CRendererPLGL::DiscardCallback;
+
+  pl_queue_push(m_plQueue, &src);
+}
+
+bool CRendererPLGL::MapCallback(pl_gpu /*gpu*/, pl_tex* /*tex*/,
+                                const struct pl_source_frame* src, struct pl_frame* out)
+{
+  // libplacebo does not zero the pl_frame before calling map(); initialize it
+  // so that crop={0,0,0,0} (full texture), field=PL_FIELD_NONE, etc. are clean.
+  *out = {};
+
+  auto* qf = static_cast<QueuedFrameState*>(src->frame_data);
+  CRendererPLGL* r = qf->renderer;
+  const int idx = qf->bufferIndex;
+
+  if (!r->UploadTexture(idx))
+    return false;
+
+  const PLBuffer& plbuf = r->m_plBuffers[idx];
+  if (!plbuf.loaded)
+    return false;
+
+  out->num_planes = plbuf.num_planes;
+  for (int n = 0; n < plbuf.num_planes; ++n)
+    out->planes[n] = plbuf.planes[n];
+  out->color = plbuf.colorSpace;
+  out->repr = plbuf.colorRepr;
+  pl_frame_set_chroma_location(out, r->m_chromaLocation);
+
+  switch (r->m_renderOrientation)
+  {
+    case 90:
+      out->rotation = PL_ROTATION_270;
+      break;
+    case 180:
+      out->rotation = PL_ROTATION_180;
+      break;
+    case 270:
+      out->rotation = PL_ROTATION_90;
+      break;
+    default:
+      out->rotation = PL_ROTATION_0;
+      break;
+  }
+
+  // pl_queue sets out->field after map() returns based on first_field splitting.
+  out->field = PL_FIELD_NONE;
+
+  // Normalize flipped planes (VAAPI stores textures bottom-first, so flipped=true).
+  // For field-based deinterlacing (YADIF), the flip must be expressed as an inverted
+  // crop instead: pl_queue assigns out->field after map() returns, and YADIF's even/odd
+  // row selection is in image space. With flipped=true, YADIF would invert field order
+  // (top-field rows map to odd texture rows instead of even), producing an upside-down
+  // image. Replacing flipped=true with crop {0,h,w,0} is visually identical but lets
+  // YADIF address fields correctly in image space.
+  bool wasFlipped = false;
+  for (int n = 0; n < out->num_planes; ++n)
+  {
+    if (out->planes[n].flipped)
+    {
+      out->planes[n].flipped = false;
+      wasFlipped = true;
+    }
+  }
+  if (wasFlipped && plbuf.tex[0])
+  {
+    const float w = static_cast<float>(plbuf.tex[0]->params.w);
+    const float h = static_cast<float>(plbuf.tex[0]->params.h);
+    out->crop = {0.0f, h, w, 0.0f};
+  }
+
+  return true;
+}
+
+void CRendererPLGL::UnmapCallback(pl_gpu /*gpu*/, struct pl_frame* /*frame*/,
+                                  const struct pl_source_frame* src)
+{
+  delete static_cast<QueuedFrameState*>(src->frame_data);
+}
+
+void CRendererPLGL::DiscardCallback(const struct pl_source_frame* src)
+{
+  delete static_cast<QueuedFrameState*>(src->frame_data);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +446,8 @@ bool CRendererPLGL::UploadTexture(int index)
     return false;
 
   PLBuffer& plbuf = m_plBuffers[index];
+  if (plbuf.loaded)
+    return true;
   ReleasePLBuffer(index);
 
 #if defined(HAVE_LIBVA)
@@ -541,12 +679,24 @@ bool CRendererPLGL::UploadTexture(int index)
       }
     }
 
-    if (buf.plColorSpace.hdr.max_luma > 0.0f || buf.plColorRepr.dovi != nullptr)
+    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+        buf.plColorRepr.dovi != nullptr)
     {
-      plbuf.colorSpace = buf.plColorSpace;
-      plbuf.colorRepr = buf.plColorRepr;
-      plbuf.doviMetadata = buf.plDoviMetadata;
-      plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      if (buf.plColorRepr.dovi != nullptr)
+      {
+        // Dolby Vision: pl_map_avdovi_metadata fills transfer, primaries, hdr, AND colorRepr
+        plbuf.colorSpace = buf.plColorSpace;
+        plbuf.colorRepr = buf.plColorRepr;
+        plbuf.doviMetadata = buf.plDoviMetadata;
+        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      }
+      else
+      {
+        // HDR10 / HDR10+: only merge hdr metadata; colorRepr was already correctly set
+        // above. buf.plColorRepr is zeroed for non-DoVi frames (DVDVideoCodecFFmpeg.cpp
+        // memsets it) and must not overwrite the sys/levels/bits we computed from stream headers.
+        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+      }
     }
 
     plbuf.iFlags = buf.iFlags;
@@ -639,12 +789,24 @@ bool CRendererPLGL::UploadTexture(int index)
       }
     }
 
-    if (buf.plColorSpace.hdr.max_luma > 0.0f || buf.plColorRepr.dovi != nullptr)
+    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+        buf.plColorRepr.dovi != nullptr)
     {
-      plbuf.colorSpace = buf.plColorSpace;
-      plbuf.colorRepr = buf.plColorRepr;
-      plbuf.doviMetadata = buf.plDoviMetadata;
-      plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      if (buf.plColorRepr.dovi != nullptr)
+      {
+        // Dolby Vision: pl_map_avdovi_metadata fills transfer, primaries, hdr, AND colorRepr
+        plbuf.colorSpace = buf.plColorSpace;
+        plbuf.colorRepr = buf.plColorRepr;
+        plbuf.doviMetadata = buf.plDoviMetadata;
+        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      }
+      else
+      {
+        // HDR10 / HDR10+: only merge hdr metadata; colorRepr was already correctly set
+        // above. buf.plColorRepr is zeroed for non-DoVi frames (DVDVideoCodecFFmpeg.cpp
+        // memsets it) and must not overwrite the sys/levels/bits we computed from stream headers.
+        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+      }
     }
 
     plbuf.iFlags = buf.iFlags;
@@ -728,12 +890,24 @@ bool CRendererPLGL::UploadTexture(int index)
   }
 
   // --- Per-frame libplacebo color metadata (covers Dolby Vision RPU) ---
-  if (buf.plColorSpace.hdr.max_luma > 0.0f || buf.plColorRepr.dovi != nullptr)
+  if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+      buf.plColorRepr.dovi != nullptr)
   {
-    plbuf.colorSpace = buf.plColorSpace;
-    plbuf.colorRepr = buf.plColorRepr;
-    plbuf.doviMetadata = buf.plDoviMetadata;
-    plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+    if (buf.plColorRepr.dovi != nullptr)
+    {
+      // Dolby Vision: pl_map_avdovi_metadata fills transfer, primaries, hdr, AND colorRepr
+      plbuf.colorSpace = buf.plColorSpace;
+      plbuf.colorRepr = buf.plColorRepr;
+      plbuf.doviMetadata = buf.plDoviMetadata;
+      plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+    }
+    else
+    {
+      // HDR10 / HDR10+: only merge hdr metadata; colorRepr was already correctly set
+      // above. buf.plColorRepr is zeroed for non-DoVi frames (DVDVideoCodecFFmpeg.cpp
+      // memsets it) and must not overwrite the sys/levels/bits we computed from stream headers.
+      pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+    }
   }
 
   // --- Interlace flags ---
@@ -777,17 +951,10 @@ bool CRendererPLGL::RenderHook(int idx)
     default:  frameIn.rotation = PL_ROTATION_0;   break;
   }
 
-  // --- Interlace field tagging ---
-  if (plbuf.iFlags & DVP_FLAG_INTERLACED)
-  {
-    bool topFirst = (plbuf.iFlags & DVP_FLAG_TOP_FIELD_FIRST) != 0;
-    frameIn.field = topFirst ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
-    frameIn.first_field = topFirst ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
-  }
-  else
-  {
-    frameIn.field = PL_FIELD_NONE;
-  }
+  // pl_queue handles field splitting internally; always leave frameIn untagged.
+  // The queue path below uses pl_render_image_mix which receives the correct
+  // field assignment from pl_queue_update.
+  frameIn.field = PL_FIELD_NONE;
 
   // --- Determine output viewport ---
   CRect src, dst, view;
@@ -825,15 +992,18 @@ bool CRendererPLGL::RenderHook(int idx)
   frameOut.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
   frameOut.crop = {dst.x1, dst.y1, dst.x2, dst.y2};
 
-  // Determine display colour space from picture HDR metadata
-  const CPictureBuffer& buf = m_buffers[idx];
-  if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-      buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+  // Set the output colour space to match the actual display.
+  // m_passthroughHDR is set by CLinuxRendererGL::Configure when SetHDR() succeeds,
+  // meaning the OS has placed the display into HDR mode (DRM/Wayland HDR metadata
+  // configured). In that case libplacebo should pass the HDR signal through without
+  // tone-mapping; otherwise it tone-maps to SDR BT.709/BT.1886.
+  if (m_passthroughHDR)
   {
-    // HDR content — target display as HDR BT.2020
+    const CPictureBuffer& buf = m_buffers[idx];
     frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
-    frameOut.color.transfer =
-        (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67) ? PL_COLOR_TRC_HLG : PL_COLOR_TRC_PQ;
+    frameOut.color.transfer = (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+                                  ? PL_COLOR_TRC_HLG
+                                  : PL_COLOR_TRC_PQ;
   }
   else
   {
@@ -870,8 +1040,39 @@ bool CRendererPLGL::RenderHook(int idx)
   GLint savedVAO{};
   glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVAO);
 
-  if (!pl_render_image(renderer, &frameIn, &frameOut, &params))
-    CLog::Log(LOGWARNING, "CRendererPLGL::RenderHook - pl_render_image returned false");
+  // --- Queue-based render path (YADIF deinterlacing with prev/curr/next frames) ---
+  bool rendered = false;
+  if (m_plQueue && m_queuePtsOffsetSet)
+  {
+    const CPictureBuffer& buf = m_buffers[idx];
+    const float vsyncDuration =
+        1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+
+    pl_queue_params qparams{};
+    qparams.pts = buf.pts - m_queuePtsOffset;
+    qparams.radius = pl_frame_mix_radius(&params);
+    qparams.vsync_duration = vsyncDuration;
+    qparams.timeout = 0;
+
+    pl_frame_mix mix{};
+    const auto status = pl_queue_update(m_plQueue, &mix, &qparams);
+    if (status == PL_QUEUE_OK || status == PL_QUEUE_MORE)
+    {
+      if (!pl_render_image_mix(renderer, &mix, &frameOut, &params))
+        CLog::Log(LOGWARNING, "CRendererPLGL::RenderHook - pl_render_image_mix failed");
+      rendered = true;
+    }
+    else if (status == PL_QUEUE_ERR)
+    {
+      CLog::Log(LOGWARNING, "CRendererPLGL::RenderHook - pl_queue_update error");
+    }
+  }
+  if (!rendered)
+  {
+    // Fallback: single-frame render (weaved, no deinterlacing)
+    if (!pl_render_image(renderer, &frameIn, &frameOut, &params))
+      CLog::Log(LOGWARNING, "CRendererPLGL::RenderHook - pl_render_image failed");
+  }
 
   // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit
   // (gpu_tex.c:869-870), so even a successful render leaves DRAW_FRAMEBUFFER=0.

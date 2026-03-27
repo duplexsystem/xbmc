@@ -51,6 +51,8 @@ public:
   bool ConfigChanged(const VideoPicture& picture) override;
   bool Supports(ERENDERFEATURE feature) const override;
   bool Supports(ESCALINGMETHOD method) const override;
+  void AddVideoPicture(const VideoPicture& picture, int index) override;
+  bool Flush(bool saveBuffers) override;
 
 protected:
   // Texture lifecycle
@@ -105,6 +107,22 @@ private:
   pl_color_space m_colorSpace{};
   pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
   pl_options m_plOpts{nullptr}; ///< Owns all libplacebo render parameters
+
+  struct QueuedFrameState
+  {
+    int bufferIndex;
+    CRendererPLGLES* renderer;
+  };
+
+  pl_queue m_plQueue{nullptr};
+  double m_queuePtsOffset{0.0};
+  bool m_queuePtsOffsetSet{false};
+
+  static bool MapCallback(pl_gpu gpu, pl_tex* tex, const struct pl_source_frame* src,
+                          struct pl_frame* out);
+  static void UnmapCallback(pl_gpu gpu, struct pl_frame* frame,
+                            const struct pl_source_frame* src);
+  static void DiscardCallback(const struct pl_source_frame* src);
 
   // Release all libplacebo textures (and unmap any DRMPRIME texture) for a slot
   void ReleasePLBuffer(int index);
