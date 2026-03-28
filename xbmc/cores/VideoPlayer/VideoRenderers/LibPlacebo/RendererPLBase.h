@@ -133,6 +133,24 @@ private:
   double m_queuePtsOffset{0.0};
   bool m_queuePtsOffsetSet{false};
 
+  // Cached GL framebuffer → pl_tex wrapper.
+  // pl_opengl_wrap/pl_tex_destroy for a framebuffer flushes GPU command queues on
+  // some drivers and forces a full libplacebo internal state reset.  Wrapping once
+  // and reusing the same pl_tex across frames avoids that overhead entirely.
+  // Invalidated when the bound FBO id, viewport width, or viewport height changes.
+  pl_tex m_cachedFboTex{nullptr};
+  unsigned int m_cachedFboId{UINT_MAX};
+  int m_cachedFboW{0};
+  int m_cachedFboH{0};
+
+  // Cached Kodi VAO handle.
+  // glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serialises the GPU command stream on
+  // tile-based GPUs (Mali / Adreno / PowerVR / Apple GPU) because the driver must
+  // finish all in-flight work before reading back a GPU-side integer.  Kodi's VAO
+  // is stable for the lifetime of the renderer, so we query it once and cache it.
+  GLint m_kodiVAO{0};
+  bool m_kodiVaoCached{false};
+
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
                           const struct pl_source_frame* src,
@@ -162,6 +180,11 @@ CRendererPLBase<TBase>::~CRendererPLBase()
   {
     pl_queue_destroy(&m_plQueue);
     m_plQueue = nullptr;
+  }
+  if (m_cachedFboTex)
+  {
+    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    m_cachedFboTex = nullptr;
   }
   pl_options_free(&m_plOpts);
   PL::PLInstance::Get()->Reset();
@@ -217,6 +240,18 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   }
   m_queuePtsOffsetSet = false;
 
+  // Invalidate per-session render caches: the FBO or window size may have changed
+  // and Kodi's VAO may have been recreated since the last Configure call.
+  if (m_cachedFboTex)
+  {
+    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    m_cachedFboTex = nullptr;
+  }
+  m_cachedFboId = UINT_MAX;
+  m_cachedFboW = 0;
+  m_cachedFboH = 0;
+  m_kodiVaoCached = false;
+
   return true;
 }
 
@@ -234,6 +269,17 @@ bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
     pl_queue_reset(m_plQueue);
     m_queuePtsOffsetSet = false;
   }
+  // The FBO may be recreated after a seek/stop; drop the cached wrapper so
+  // RenderHook re-wraps with the current FBO on the next frame.
+  if (m_cachedFboTex)
+  {
+    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    m_cachedFboTex = nullptr;
+  }
+  m_cachedFboId = UINT_MAX;
+  m_cachedFboW = 0;
+  m_cachedFboH = 0;
+  // VAO is stable across seeks; no need to invalidate m_kodiVaoCached.
   return TBase::Flush(saveBuffers);
 }
 
@@ -536,7 +582,13 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     }
 
     VADisplay vadsp = vaaPic->vadsp;
-    vaSyncSurface(vadsp, surface);
+    // When DMA-buf implicit fencing is present (signalled by eglQueryDmaBufModifiersEXT
+    // support), the kernel synchronises cross-device access via DMA-buf fence objects.
+    // vaSyncSurface() is a blocking CPU stall that waits for the VAAPI decode engine
+    // to finish; with implicit fencing the EGL/KMS stack already handles this, so the
+    // stall is redundant and wastes several milliseconds per frame on busy decoders.
+    if (!m_hasEGLModifiers)
+      vaSyncSurface(vadsp, surface);
 
     VADRMPRIMESurfaceDescriptor desc{};
     VAStatus vaStatus = vaExportSurfaceHandle(
@@ -1005,19 +1057,36 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
 
   GLint currentFbo = 0;
   glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFbo);
+  const unsigned int fboId = static_cast<unsigned int>(currentFbo);
 
-  pl_opengl_wrap_params wrapParams{};
-  wrapParams.framebuffer = static_cast<unsigned int>(currentFbo);
-  wrapParams.width = viewW;
-  wrapParams.height = viewH;
-  wrapParams.iformat = GL_RGBA8;
-
-  pl_tex outTex = pl_opengl_wrap(gpu, &wrapParams);
-  if (!outTex)
+  // Re-wrap the framebuffer only when it changes.  pl_opengl_wrap/pl_tex_destroy
+  // on every frame is expensive: some drivers flush pending GPU work at this point
+  // and libplacebo discards cached per-target state, forcing a full re-initialisation
+  // on the next pl_render_image[_mix] call.
+  if (!m_cachedFboTex || fboId != m_cachedFboId || viewW != m_cachedFboW ||
+      viewH != m_cachedFboH)
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::RenderHook - failed to wrap GL framebuffer");
-    return false;
+    if (m_cachedFboTex)
+      pl_tex_destroy(gpu, &m_cachedFboTex);
+
+    pl_opengl_wrap_params wrapParams{};
+    wrapParams.framebuffer = fboId;
+    wrapParams.width = viewW;
+    wrapParams.height = viewH;
+    wrapParams.iformat = GL_RGBA8;
+
+    m_cachedFboTex = pl_opengl_wrap(gpu, &wrapParams);
+    if (!m_cachedFboTex)
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::RenderHook - failed to wrap GL framebuffer");
+      m_cachedFboId = UINT_MAX;
+      return false;
+    }
+    m_cachedFboId = fboId;
+    m_cachedFboW = viewW;
+    m_cachedFboH = viewH;
   }
+  pl_tex outTex = m_cachedFboTex;
 
   pl_frame frameOut{};
   frameOut.num_planes = 1;
@@ -1060,8 +1129,16 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   glGetIntegerv(GL_SCISSOR_BOX, savedScissor);
   // libplacebo binds its own VAO per-pass and resets to VAO 0 at exit.
   // In GL/GLES core profile VAO 0 is invalid; restore Kodi's VAO.
-  GLint savedVAO{};
-  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVAO);
+  // Cache the result: glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serialises the GPU
+  // command stream on tile-based GPUs (Mali/Adreno/PowerVR) because the driver
+  // must flush in-flight work before reading the register.  Kodi's VAO is created
+  // once at startup and never changes, so we query it only on the first render.
+  if (!m_kodiVaoCached)
+  {
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &m_kodiVAO);
+    m_kodiVaoCached = true;
+  }
+  const GLint savedVAO = m_kodiVAO;
 
   // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF)
   bool rendered = false;
@@ -1116,7 +1193,8 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   // GUI renders with the wrong shader.
   glUseProgram(0);
 
-  pl_tex_destroy(gpu, &outTex);
+  // outTex aliases m_cachedFboTex — do NOT destroy it here.  It lives across
+  // frames and is released in Flush(), Configure(), and the destructor.
 
   // Always return true: we own this slot; the base must not fall through to
   // its own render path which would crash on uninitialized GL planes.
