@@ -14,6 +14,7 @@
 
 #if defined(HAVE_LIBVA)
 #include "system_egl.h"
+
 #include <EGL/eglext.h>
 #endif
 
@@ -118,10 +119,11 @@ private:
   double m_queuePtsOffset{0.0};
   bool m_queuePtsOffsetSet{false};
 
-  static bool MapCallback(pl_gpu gpu, pl_tex* tex, const struct pl_source_frame* src,
+  static bool MapCallback(pl_gpu gpu,
+                          pl_tex* tex,
+                          const struct pl_source_frame* src,
                           struct pl_frame* out);
-  static void UnmapCallback(pl_gpu gpu, struct pl_frame* frame,
-                            const struct pl_source_frame* src);
+  static void UnmapCallback(pl_gpu gpu, struct pl_frame* frame, const struct pl_source_frame* src);
   static void DiscardCallback(const struct pl_source_frame* src);
 
   // Release all libplacebo textures (and unmap any DRMPRIME texture) for a slot

@@ -604,7 +604,8 @@ void CRendererBase::ProcessHDR(CRenderBuffer* rb)
   }
 
   // HDR10
-  if ((rb->color_transfer == AVCOL_TRC_SMPTE2084 && rb->primaries == AVCOL_PRI_BT2020) || rb->m_isDolbyVision)
+  if ((rb->color_transfer == AVCOL_TRC_SMPTE2084 && rb->primaries == AVCOL_PRI_BT2020) ||
+      rb->m_isDolbyVision)
   {
     DXGI_HDR_METADATA_HDR10 hdr10 = GetDXGIHDR10MetaData(rb);
     if (m_HdrType == HDR_TYPE::HDR_HDR10)

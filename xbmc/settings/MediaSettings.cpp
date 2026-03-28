@@ -104,7 +104,6 @@ bool CMediaSettings::Load(const TiXmlNode *settings)
 
     if (!XMLUtils::GetFloat(pElement, "tonemapparam", m_defaultVideoSettings.m_ToneMapParam, 0.1f, 5.0f))
       m_defaultVideoSettings.m_ToneMapParam = 1.0f;
-
   }
 
   m_defaultGameSettings.Reset();

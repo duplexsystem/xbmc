@@ -16,23 +16,25 @@
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
-#include "system_egl.h"
-#include "system_gl.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
+#include "system_egl.h"
+#include "system_gl.h"
+
 #if defined(HAVE_LIBVA)
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
+
 #include <drm_fourcc.h>
 #include <va/va_drmcommon.h>
 #endif
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <libplacebo/utils/libav.h>
 #include <unistd.h>
 
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 
 // ---------------------------------------------------------------------------
 // Static factory
@@ -58,8 +60,7 @@ CBaseRenderer* CRendererPLGL::Create(CVideoBuffer* buffer)
 
   if (!isSW && !isVAAPI && !isDRMPRIME)
   {
-    CLog::Log(LOGDEBUG,
-              "CRendererPLGL::Create - unsupported buffer type (format {}), skipping",
+    CLog::Log(LOGDEBUG, "CRendererPLGL::Create - unsupported buffer type (format {}), skipping",
               static_cast<int>(buffer->GetFormat()));
     return nullptr;
   }
@@ -124,10 +125,10 @@ bool CRendererPLGL::Configure(const VideoPicture& picture, float fps, unsigned i
   if (m_isVAAPI)
   {
     m_eglDisplay = eglGetCurrentDisplay();
-    m_eglCreateImageKHR = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
-        eglGetProcAddress("eglCreateImageKHR"));
-    m_eglDestroyImageKHR = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
-        eglGetProcAddress("eglDestroyImageKHR"));
+    m_eglCreateImageKHR =
+        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+    m_eglDestroyImageKHR =
+        reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
     m_glEGLImageTargetTexture2DOES = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
         eglGetProcAddress("glEGLImageTargetTexture2DOES"));
     m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
@@ -192,8 +193,7 @@ void CRendererPLGL::AddVideoPicture(const VideoPicture& picture, int index)
   src.pts = picture.pts - m_queuePtsOffset;
   src.duration = 1.0 / static_cast<double>(m_fps);
   if (picture.iFlags & DVP_FLAG_INTERLACED)
-    src.first_field =
-        (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
+    src.first_field = (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
   src.frame_data = qf;
   src.map = &CRendererPLGL::MapCallback;
   src.unmap = &CRendererPLGL::UnmapCallback;
@@ -202,8 +202,10 @@ void CRendererPLGL::AddVideoPicture(const VideoPicture& picture, int index)
   pl_queue_push(m_plQueue, &src);
 }
 
-bool CRendererPLGL::MapCallback(pl_gpu /*gpu*/, pl_tex* /*tex*/,
-                                const struct pl_source_frame* src, struct pl_frame* out)
+bool CRendererPLGL::MapCallback(pl_gpu /*gpu*/,
+                                pl_tex* /*tex*/,
+                                const struct pl_source_frame* src,
+                                struct pl_frame* out)
 {
   // libplacebo does not zero the pl_frame before calling map(); initialize it
   // so that crop={0,0,0,0} (full texture), field=PL_FIELD_NONE, etc. are clean.
@@ -256,7 +258,8 @@ bool CRendererPLGL::MapCallback(pl_gpu /*gpu*/, pl_tex* /*tex*/,
   return true;
 }
 
-void CRendererPLGL::UnmapCallback(pl_gpu /*gpu*/, struct pl_frame* /*frame*/,
+void CRendererPLGL::UnmapCallback(pl_gpu /*gpu*/,
+                                  struct pl_frame* /*frame*/,
                                   const struct pl_source_frame* src)
 {
   delete static_cast<QueuedFrameState*>(src->frame_data);
@@ -357,8 +360,7 @@ void CRendererPLGL::UpdateVideoFilter()
 
   // Per-video tone mapping override (existing Kodi setting takes precedence)
   static const char* const kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
-  if (m_videoSettings.m_ToneMapMethod > 0 &&
-      m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
+  if (m_videoSettings.m_ToneMapMethod > 0 && m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
     pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[m_videoSettings.m_ToneMapMethod]);
 
   // Dithering
@@ -479,10 +481,9 @@ bool CRendererPLGL::UploadTexture(int index)
     vaSyncSurface(vadsp, surface);
 
     VADRMPRIMESurfaceDescriptor desc{};
-    VAStatus vaStatus = vaExportSurfaceHandle(vadsp, surface,
-        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
-        &desc);
+    VAStatus vaStatus = vaExportSurfaceHandle(
+        vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
     if (vaStatus != VA_STATUS_SUCCESS)
     {
       CLog::Log(LOGERROR, "CRendererPLGL::UploadTexture - vaExportSurfaceHandle failed: {}",
@@ -491,8 +492,8 @@ bool CRendererPLGL::UploadTexture(int index)
     }
 
     // Take ownership of the exported fds; EGL internally dups them in eglCreateImageKHR
-    plbuf.vaapiNumFds = static_cast<int>(std::min(desc.num_objects,
-        static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
+    plbuf.vaapiNumFds = static_cast<int>(
+        std::min(desc.num_objects, static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
     for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
       plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
 
@@ -514,12 +515,18 @@ bool CRendererPLGL::UploadTexture(int index)
       // Build EGL attribute list for DMA-buf import (max 6 static + 2 modifier = 8 pairs + EGL_NONE)
       EGLint attribs[17];
       EGLint* a = attribs;
-      *a++ = EGL_LINUX_DRM_FOURCC_EXT;      *a++ = static_cast<EGLint>(layer.drm_format);
-      *a++ = EGL_WIDTH;                      *a++ = planeW;
-      *a++ = EGL_HEIGHT;                     *a++ = planeH;
-      *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;     *a++ = object.fd;
-      *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT; *a++ = static_cast<EGLint>(layer.offset[0]);
-      *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;  *a++ = static_cast<EGLint>(layer.pitch[0]);
+      *a++ = EGL_LINUX_DRM_FOURCC_EXT;
+      *a++ = static_cast<EGLint>(layer.drm_format);
+      *a++ = EGL_WIDTH;
+      *a++ = planeW;
+      *a++ = EGL_HEIGHT;
+      *a++ = planeH;
+      *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
+      *a++ = object.fd;
+      *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+      *a++ = static_cast<EGLint>(layer.offset[0]);
+      *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+      *a++ = static_cast<EGLint>(layer.pitch[0]);
       if (m_hasEGLModifiers && object.drm_format_modifier != DRM_FORMAT_MOD_INVALID)
       {
         *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
@@ -530,12 +537,13 @@ bool CRendererPLGL::UploadTexture(int index)
       *a++ = EGL_NONE;
 
       EGLImageKHR eglImage = m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT,
-          EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+                                                 EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
       if (!eglImage)
       {
         CLog::Log(LOGERROR,
                   "CRendererPLGL::UploadTexture - eglCreateImageKHR failed for VAAPI plane {} "
-                  "(EGL error 0x{:x})", i, static_cast<unsigned>(eglGetError()));
+                  "(EGL error 0x{:x})",
+                  i, static_cast<unsigned>(eglGetError()));
         success = false;
         break;
       }
@@ -558,14 +566,23 @@ bool CRendererPLGL::UploadTexture(int index)
       GLenum glIformat = 0;
       switch (layer.drm_format)
       {
-        case DRM_FORMAT_R8:     glIformat = GL_R8;   break;
-        case DRM_FORMAT_GR88:   glIformat = GL_RG8;  break;
-        case DRM_FORMAT_R16:    glIformat = GL_R16;  break;
-        case DRM_FORMAT_GR1616: glIformat = GL_RG16; break;
+        case DRM_FORMAT_R8:
+          glIformat = GL_R8;
+          break;
+        case DRM_FORMAT_GR88:
+          glIformat = GL_RG8;
+          break;
+        case DRM_FORMAT_R16:
+          glIformat = GL_R16;
+          break;
+        case DRM_FORMAT_GR1616:
+          glIformat = GL_RG16;
+          break;
         default:
-          CLog::Log(LOGERROR,
-                    "CRendererPLGL::UploadTexture - unsupported DRM fourcc 0x{:x} for VAAPI plane {}",
-                    layer.drm_format, i);
+          CLog::Log(
+              LOGERROR,
+              "CRendererPLGL::UploadTexture - unsupported DRM fourcc 0x{:x} for VAAPI plane {}",
+              layer.drm_format, i);
           success = false;
           break;
       }
@@ -574,10 +591,10 @@ bool CRendererPLGL::UploadTexture(int index)
 
       pl_opengl_wrap_params wp{};
       wp.texture = plbuf.vaapiGLTex[i];
-      wp.target  = GL_TEXTURE_2D;
+      wp.target = GL_TEXTURE_2D;
       wp.iformat = static_cast<int>(glIformat);
-      wp.width   = planeW;
-      wp.height  = planeH;
+      wp.width = planeW;
+      wp.height = planeH;
 
       plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
       if (!plbuf.tex[i])
@@ -639,9 +656,14 @@ bool CRendererPLGL::UploadTexture(int index)
     // P016 uses the full 16-bit range. NV12 uses the default (8-bit, zeros).
     switch (desc.fourcc)
     {
-      case VA_FOURCC_P010: plbuf.colorRepr.bits = {16, 10, 6}; break;
-      case VA_FOURCC_P016: plbuf.colorRepr.bits = {16, 16, 0}; break;
-      default: break;
+      case VA_FOURCC_P010:
+        plbuf.colorRepr.bits = {16, 10, 6};
+        break;
+      case VA_FOURCC_P016:
+        plbuf.colorRepr.bits = {16, 16, 0};
+        break;
+      default:
+        break;
     }
 
     if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
@@ -823,7 +845,8 @@ bool CRendererPLGL::UploadTexture(int index)
   plbuf.num_planes = pl_plane_data_from_pixfmt(pdata, &bits, fmt);
   if (plbuf.num_planes <= 0)
   {
-    CLog::Log(LOGERROR, "CRendererPLGL::UploadTexture - unsupported pixel format {} (buf reports {})",
+    CLog::Log(LOGERROR,
+              "CRendererPLGL::UploadTexture - unsupported pixel format {} (buf reports {})",
               static_cast<int>(fmt), static_cast<int>(buf.videoBuffer->GetFormat()));
     return false;
   }
@@ -851,12 +874,12 @@ bool CRendererPLGL::UploadTexture(int index)
 
   // --- Color metadata ---
   plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-  plbuf.colorSpace.transfer  = pl_transfer_from_av(buf.m_srcColTransfer);
-  plbuf.colorRepr.sys    = pl_system_from_av(buf.m_srcColSpace);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
   if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
     plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(m_sourceWidth, m_sourceHeight);
   plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-  plbuf.colorRepr.bits   = bits;
+  plbuf.colorRepr.bits = bits;
 
   // --- HDR static metadata (mastering display + CLL) ---
   if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
@@ -867,12 +890,12 @@ bool CRendererPLGL::UploadTexture(int index)
     if (buf.hasDisplayMetadata)
     {
       const AVMasteringDisplayMetadata& m = buf.displayMetadata;
-      hdr.prim.red.x   = av_q2d(m.display_primaries[0][0]);
-      hdr.prim.red.y   = av_q2d(m.display_primaries[0][1]);
+      hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+      hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
       hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
       hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-      hdr.prim.blue.x  = av_q2d(m.display_primaries[2][0]);
-      hdr.prim.blue.y  = av_q2d(m.display_primaries[2][1]);
+      hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+      hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
       hdr.prim.white.x = av_q2d(m.white_point[0]);
       hdr.prim.white.y = av_q2d(m.white_point[1]);
       if (m.has_luminance)
@@ -883,7 +906,7 @@ bool CRendererPLGL::UploadTexture(int index)
     }
     if (buf.hasLightMetadata)
     {
-      hdr.max_cll  = buf.lightMetadata.MaxCLL;
+      hdr.max_cll = buf.lightMetadata.MaxCLL;
       hdr.max_fall = buf.lightMetadata.MaxFALL;
     }
   }
@@ -936,7 +959,7 @@ bool CRendererPLGL::RenderHook(int idx)
   for (int n = 0; n < plbuf.num_planes; ++n)
     frameIn.planes[n] = plbuf.planes[n];
   frameIn.color = plbuf.colorSpace;
-  frameIn.repr  = plbuf.colorRepr;
+  frameIn.repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 
   // --- Rotation: map Kodi degrees (CCW) to libplacebo pl_rotation ---
@@ -944,10 +967,18 @@ bool CRendererPLGL::RenderHook(int idx)
   // pl_rotation is CW (0/90/180/270). So CCW 90 == CW 270, etc.
   switch (m_renderOrientation)
   {
-    case 90:  frameIn.rotation = PL_ROTATION_270; break; // CCW 90 -> CW 270
-    case 180: frameIn.rotation = PL_ROTATION_180; break;
-    case 270: frameIn.rotation = PL_ROTATION_90;  break; // CCW 270 -> CW 90
-    default:  frameIn.rotation = PL_ROTATION_0;   break;
+    case 90:
+      frameIn.rotation = PL_ROTATION_270;
+      break; // CCW 90 -> CW 270
+    case 180:
+      frameIn.rotation = PL_ROTATION_180;
+      break;
+    case 270:
+      frameIn.rotation = PL_ROTATION_90;
+      break; // CCW 270 -> CW 90
+    default:
+      frameIn.rotation = PL_ROTATION_0;
+      break;
   }
 
   // pl_queue handles field splitting internally; always leave frameIn untagged.
@@ -1000,9 +1031,8 @@ bool CRendererPLGL::RenderHook(int idx)
   {
     const CPictureBuffer& buf = m_buffers[idx];
     frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
-    frameOut.color.transfer = (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
-                                  ? PL_COLOR_TRC_HLG
-                                  : PL_COLOR_TRC_PQ;
+    frameOut.color.transfer =
+        (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67) ? PL_COLOR_TRC_HLG : PL_COLOR_TRC_PQ;
   }
   else
   {
@@ -1010,9 +1040,8 @@ bool CRendererPLGL::RenderHook(int idx)
     frameOut.color.transfer = PL_COLOR_TRC_BT_1886;
   }
   frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
-  frameOut.repr.levels =
-      CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
-                                                        : PL_COLOR_LEVELS_FULL;
+  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
+                                                                           : PL_COLOR_LEVELS_FULL;
 
   // Derive final render params from pl_options; apply Kodi-specific override
   pl_render_params params = m_plOpts->params;
@@ -1044,8 +1073,7 @@ bool CRendererPLGL::RenderHook(int idx)
   if (m_plQueue && m_queuePtsOffsetSet)
   {
     const CPictureBuffer& buf = m_buffers[idx];
-    const float vsyncDuration =
-        1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+    const float vsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
 
     pl_queue_params qparams{};
     qparams.pts = buf.pts - m_queuePtsOffset;

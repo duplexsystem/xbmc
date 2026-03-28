@@ -136,8 +136,7 @@ public:
 
   const pl_tone_map_function* GetToneMappingFunction(pl_tone_mapping method);
 
-
 private:
-  bool m_isInitialized{ false };
+  bool m_isInitialized{false};
 };
 } // namespace PL

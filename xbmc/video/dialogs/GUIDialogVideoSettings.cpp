@@ -61,7 +61,6 @@
 #define SETTING_VIDEO_CALIBRATION         "video.calibration"
 #define SETTING_VIDEO_STREAM              "video.stream"
 
-
 CGUIDialogVideoSettings::CGUIDialogVideoSettings()
     : CGUIDialogSettingsManualBase(WINDOW_DIALOG_VIDEO_OSD_SETTINGS, "DialogSettings.xml")
 { }
@@ -454,7 +453,6 @@ void CGUIDialogVideoSettings::InitializeSettings()
     AddSlider(groupVideo, SETTING_VIDEO_TONEMAP_PARAM, 36556, SettingLevel::Basic,
               videoSettings.m_ToneMapParam, "{:2.2f}", 0.1f, 0.1f, 5.0f, 36556, usePopup, false,
               visible);
-
   }
 
   // stereoscopic settings

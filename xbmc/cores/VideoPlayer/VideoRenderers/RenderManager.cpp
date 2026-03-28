@@ -470,9 +470,8 @@ void CRenderManager::CreateRenderer()
     if (m_pConfigPicture)
       buffer = m_pConfigPicture->videoBuffer;
 
-    int renderMethod = CServiceBroker::GetSettingsComponent()
-                           ->GetSettings()
-                           ->GetInt(CSettings::SETTING_VIDEOPLAYER_RENDERMETHOD);
+    int renderMethod = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+        CSettings::SETTING_VIDEOPLAYER_RENDERMETHOD);
 
     if (renderMethod == RENDER_METHOD_LIBPLACEBO)
     {

@@ -88,7 +88,6 @@ bool CRendererPL::Configure(const VideoPicture& picture, float fps, unsigned ori
 
 DEBUG_INFO_VIDEO CRendererPL::GetDebugInfo(int idx)
 {
-  
 
   CRenderBuffer* rb = m_renderBuffers[idx];
   CRenderBufferImpl* plbuffer = static_cast<CRenderBufferImpl*>(rb);
@@ -101,12 +100,15 @@ DEBUG_INFO_VIDEO CRendererPL::GetDebugInfo(int idx)
                           DX::DXGIFormatToShortString(m_IntermediateTarget.GetFormat()));
 
   info.videoSource +=
-      StringUtils::Format(" Transfer: {} Primaries: {}", PL::PLInstance::Get()->pl_color_transfer_short_name(m_displayTransfer),
+      StringUtils::Format(" Transfer: {} Primaries: {}",
+                          PL::PLInstance::Get()->pl_color_transfer_short_name(m_displayTransfer),
                           PL::PLInstance::Get()->pl_color_primaries_short_name(m_displayPrimaries));
 
   info.metaLight = StringUtils::Format(
-      "Input: Matrix:{} Primaries:{} Transfer:{}", PL::PLInstance::Get()->pl_color_primaries_short_name(m_colorSpace.primaries),
-      PL::PLInstance::Get()->pl_color_transfer_short_name(m_colorSpace.transfer), PL::PLInstance::Get()->pl_color_system_short_name(m_videoMatrix));
+      "Input: Matrix:{} Primaries:{} Transfer:{}",
+      PL::PLInstance::Get()->pl_color_primaries_short_name(m_colorSpace.primaries),
+      PL::PLInstance::Get()->pl_color_transfer_short_name(m_colorSpace.transfer),
+      PL::PLInstance::Get()->pl_color_system_short_name(m_videoMatrix));
 
   //If we have metadata and we are sending it to the swapchain
   if (plbuffer->hasDisplayMetadata && m_bTargetColorspaceHint)
@@ -154,7 +156,7 @@ void CRendererPL::CheckVideoParameters()
   CreateIntermediateTarget(m_viewWidth, m_viewHeight, false);
 
   PL::PLInstance::Get()->fill_d3d_format(&m_plOutputFormat, m_IntermediateTarget.GetFormat());
-  
+
   m_plRenderParams = pl_render_default_params;
   PL::pl_tone_mapping method;
   switch (m_videoSettings.m_ToneMapMethod)
@@ -172,39 +174,35 @@ void CRendererPL::CheckVideoParameters()
     default:
       method = PL::TONE_MAPPING_AUTO;
       break;
-
   }
   //m_videoSettings.m_ToneMapParam
   //This one was deprecated and should modify tone_constants
-  //it consist of 11 float settings 
+  //it consist of 11 float settings
   pl_color_map_params params = pl_color_map_high_quality_params;
   params = {
-    //const struct pl_gamut_map_function *gamut_mapping;
-    //struct pl_gamut_map_constants gamut_constants;
-    //int lut3d_size[3];
-    //bool lut3d_tricubic;
-    //bool gamut_expansion;
-    .tone_mapping_function = PL::PLInstance::Get()->GetToneMappingFunction(method),
-    //struct pl_tone_map_constants tone_constants;
-    //bool inverse_tone_mapping;
-    //enum pl_hdr_metadata_type metadata;
-    //int lut_size;
-    //float contrast_recovery;
-    //float contrast_smoothness;
-    //bool force_tone_mapping_lut;
-    //bool visualize_lut;
-    //pl_rect2df visualize_rect;
-    //float visualize_hue;    // useful range [-pi, pi]
-    //float visualize_theta;  // useful range [0, pi/2]
-    //bool show_clipping;
+      //const struct pl_gamut_map_function *gamut_mapping;
+      //struct pl_gamut_map_constants gamut_constants;
+      //int lut3d_size[3];
+      //bool lut3d_tricubic;
+      //bool gamut_expansion;
+      .tone_mapping_function = PL::PLInstance::Get()->GetToneMappingFunction(method),
+      //struct pl_tone_map_constants tone_constants;
+      //bool inverse_tone_mapping;
+      //enum pl_hdr_metadata_type metadata;
+      //int lut_size;
+      //float contrast_recovery;
+      //float contrast_smoothness;
+      //bool force_tone_mapping_lut;
+      //bool visualize_lut;
+      //pl_rect2df visualize_rect;
+      //float visualize_hue;    // useful range [-pi, pi]
+      //float visualize_theta;  // useful range [0, pi/2]
+      //bool show_clipping;
   };
   m_plRenderParams.color_map_params = &params;
 
   //To avoid spam on the debug log
   m_plRenderParams.border = PL_CLEAR_SKIP;
-  
-  
-
 }
 
 void CRendererPL::RenderImpl(CD3DTexture& target,
@@ -259,8 +257,7 @@ void CRendererPL::RenderImpl(CD3DTexture& target,
                                     .fmt = target.GetFormat(),
                                     .w = (int)target.GetWidth(),
                                     .h = (int)target.GetHeight()};
-  
-  
+
   frameOut.num_planes = m_plOutputFormat.num_planes;
   frameOut.planes[0].texture = pl_d3d11_wrap(PL::PLInstance::Get()->GetGpu(), &d3dparams);
   frameOut.planes[0].components = m_plOutputFormat.components[0];
@@ -283,9 +280,9 @@ void CRendererPL::RenderImpl(CD3DTexture& target,
   if (ActualRenderAsHDR() && m_bTargetColorspaceHint)
   {
     frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
-      // temporary until libplacebo output goes directly to back buffer
-      // and doesn't get processed by the output shader.
-      if (buf->color_transfer == AVCOL_TRC_ARIB_STD_B67)
+    // temporary until libplacebo output goes directly to back buffer
+    // and doesn't get processed by the output shader.
+    if (buf->color_transfer == AVCOL_TRC_ARIB_STD_B67)
       frameOut.color.transfer = PL_COLOR_TRC_HLG;
     else
       frameOut.color.transfer = PL_COLOR_TRC_PQ;
@@ -299,20 +296,19 @@ void CRendererPL::RenderImpl(CD3DTexture& target,
   //! @todo copy frameIn.color.hdr or make up something from the display EDID?
   frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
   frameOut.repr.levels =
-    DX::Windowing()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED : PL_COLOR_LEVELS_FULL;
-
-
+      DX::Windowing()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED : PL_COLOR_LEVELS_FULL;
 
   //Without this recent version of libplacebo would spam the debug log like crazy
   //And its also set on an info level
-  
+
   //this data is used for the video debug renderer
   m_displayTransfer = frameOut.color.transfer;
   m_displayPrimaries = frameOut.color.primaries;
   m_videoMatrix = frameIn.repr.sys;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 
-  bool res = pl_render_image(PL::PLInstance::Get()->GetRenderer(), &frameIn, &frameOut, &m_plRenderParams);
+  bool res =
+      pl_render_image(PL::PLInstance::Get()->GetRenderer(), &frameIn, &frameOut, &m_plRenderParams);
 
   sourceRect = dst;
 }
@@ -327,9 +323,9 @@ bool CRendererPL::Supports(ERENDERFEATURE feature) const
   //RENDERFEATURE_TONEMAP
   if (feature == RENDERFEATURE_BRIGHTNESS || feature == RENDERFEATURE_CONTRAST ||
       feature == RENDERFEATURE_GAMMA || feature == RENDERFEATURE_NONLINSTRETCH ||
-      feature == RENDERFEATURE_ROTATION || feature == RENDERFEATURE_NOISE || 
-      feature ==RENDERFEATURE_STRETCH || feature == RENDERFEATURE_PIXEL_RATIO || 
-      feature == RENDERFEATURE_VERTICAL_SHIFT || feature == RENDERFEATURE_ZOOM )
+      feature == RENDERFEATURE_ROTATION || feature == RENDERFEATURE_NOISE ||
+      feature == RENDERFEATURE_STRETCH || feature == RENDERFEATURE_PIXEL_RATIO ||
+      feature == RENDERFEATURE_VERTICAL_SHIFT || feature == RENDERFEATURE_ZOOM)
   {
 
     return false;
@@ -340,7 +336,7 @@ bool CRendererPL::Supports(ERENDERFEATURE feature) const
 
 bool CRendererPL::Supports(ESCALINGMETHOD method) const
 {
-  //The scaling in kodi is only one libplacebo 
+  //The scaling in kodi is only one libplacebo
   if (method == VS_SCALINGMETHOD_AUTO)
     return true;
   return true;
@@ -450,7 +446,7 @@ bool CRendererPL::CRenderBufferImpl::UploadPlanes()
       CLog::Log(LOGERROR, "pl_upload_plane failed");
     }
   }
-  
+
   m_bLoaded = true;
   return m_bLoaded;
 }
@@ -485,8 +481,8 @@ bool CRendererPL::CRenderBufferImpl::UploadWrapPlanes()
   // TODO maybe reuse the srv
   for (int i = 0; i < m_plFormat.num_planes; i++)
   {
-    CD3D11_SHADER_RESOURCE_VIEW_DESC srvDesc(D3D11_SRV_DIMENSION_TEXTURE2DARRAY, m_plFormat.planes[i],
-                                             0, 1, arrayIdx, 1);
+    CD3D11_SHADER_RESOURCE_VIEW_DESC srvDesc(D3D11_SRV_DIMENSION_TEXTURE2DARRAY,
+                                             m_plFormat.planes[i], 0, 1, arrayIdx, 1);
     hr = DX::DeviceResources::Get()->GetD3DDevice()->CreateShaderResourceView(pTexture.Get(),
                                                                               &srvDesc, &srvY);
     pl_d3d11_wrap_params params = {};

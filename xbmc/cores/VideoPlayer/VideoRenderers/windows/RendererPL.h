@@ -91,8 +91,6 @@ private:
   AVColorPrimaries m_lastPrimaries = AVCOL_PRI_UNSPECIFIED;
 
   AVPixelFormat m_format;
-
-
 };
 
 class CRendererPL::CRenderBufferImpl : public CRenderBuffer
@@ -107,7 +105,6 @@ public:
   bool HasHdrData();
 
   pl_hdr_metadata GetHdrMetadata() { return m_plColorSpace.hdr; }
-  
 
 private:
   pl_color_space m_plColorSpace; //< pl_color_space
