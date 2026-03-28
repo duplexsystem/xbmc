@@ -32,8 +32,19 @@
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
 
 #include <drm_fourcc.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 #include <va/va_drmcommon.h>
+
+// Enum constants for GL_EXT_semaphore / GL_EXT_semaphore_fd.
+// Defined here in case the system GL headers predate these extensions.
+#ifndef GL_LAYOUT_GENERAL_EXT
+#define GL_LAYOUT_GENERAL_EXT 0x958D
 #endif
+#ifndef GL_HANDLE_TYPE_SYNC_FD_EXT
+#define GL_HANDLE_TYPE_SYNC_FD_EXT 0x9586
+#endif
+#endif // HAVE_LIBVA
 
 extern "C"
 {
@@ -97,6 +108,12 @@ private:
     pl_dovi_metadata doviMetadata{}; ///< Owned copy; colorRepr.dovi points here when valid
     unsigned int iFlags{0}; ///< DVP_FLAG_* interlace flags
     bool loaded{false};
+    // Pending GL semaphore imported from a DMA-buf sync-file fence
+    // (GL_EXT_semaphore_fd).  Non-zero means glWaitSemaphoreEXT has NOT been
+    // called yet for this slot.  Used by both the VAAPI and DRMPRIME paths.
+    GLuint fenceSemaphore{0};
+    GLuint fenceTextures[3]{}; ///< GL texture handles for the barrier
+    int nFenceTextures{0};
 #if defined(HAVE_LIBVA)
     GLuint vaapiGLTex[3]{};
     EGLImageKHR vaapiEGLImage[3]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
@@ -108,6 +125,10 @@ private:
   std::array<PLBuffer, NUM_BUFFERS> m_plBuffers{};
   std::array<CDRMPRIMETexture, NUM_BUFFERS> m_drmTextures{};
   bool m_isDRMPRIME{false};
+  // True when eglQueryDmaBufModifiersEXT is available: the EGL stack inserts
+  // implicit DMA-buf fences at eglCreateImageKHR time, making explicit CPU or
+  // GPU-side sync redundant for both VAAPI and DRMPRIME paths.
+  bool m_hasEGLModifiers{false};
 
 #if defined(HAVE_LIBVA)
   bool m_isVAAPI{false};
@@ -115,7 +136,6 @@ private:
   PFNEGLCREATEIMAGEKHRPROC m_eglCreateImageKHR{nullptr};
   PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR{nullptr};
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
-  bool m_hasEGLModifiers{false};
 #endif
 
   AVPixelFormat m_format{AV_PIX_FMT_NONE};
@@ -150,6 +170,42 @@ private:
   // is stable for the lifetime of the renderer, so we query it once and cache it.
   GLint m_kodiVAO{0};
   bool m_kodiVaoCached{false};
+
+  // Cached GL save/restore state.
+  // Viewport, scissor enable, and scissor box are CPU-side shadow state in every
+  // known GL driver (not a GPU round-trip), but we still save 3 function calls per
+  // frame by caching them.  Invalidated whenever the FBO dimensions change.
+  bool m_glStateCached{false};
+  GLint m_cachedGLViewport[4]{};
+  GLboolean m_cachedScissorEnabled{GL_FALSE};
+  GLint m_cachedGLScissor[4]{};
+
+  // When the GL context was created with EGL_CONTEXT_OPENGL_NO_ERROR_KHR, all
+  // error generation is disabled and glGetError() always returns GL_NO_ERROR.
+  // In that case we can skip the pre-render error drain entirely.
+  bool m_glNoError{false};
+
+  // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
+  //
+  // Used for both VAAPI and DRMPRIME paths.  When these extensions and the
+  // DMA_BUF_IOCTL_EXPORT_SYNC_FILE ioctl (kernel ≥ 5.2) are available, we
+  // export the DMA-buf read fence as a sync-file fd, import it as a GL
+  // semaphore, and call glWaitSemaphoreEXT — a GPU command-stream wait that
+  // never stalls the CPU.
+  //
+  // Function pointer types use private aliases to avoid conflicts with system
+  // GL headers that may define the same PFNGL…PROC typedefs differently.
+  using FnGlGenSemaphoresEXT = void (*)(GLsizei, GLuint*);
+  using FnGlDeleteSemaphoresEXT = void (*)(GLsizei, const GLuint*);
+  using FnGlImportSemaphoreFdEXT = void (*)(GLuint, GLenum, GLint);
+  using FnGlWaitSemaphoreEXT = void (*)(GLuint, GLuint, const GLuint*, GLuint,
+                                        const GLuint*, const GLenum*);
+
+  FnGlGenSemaphoresEXT m_glGenSemaphoresEXT{nullptr};
+  FnGlDeleteSemaphoresEXT m_glDeleteSemaphoresEXT{nullptr};
+  FnGlImportSemaphoreFdEXT m_glImportSemaphoreFdEXT{nullptr};
+  FnGlWaitSemaphoreEXT m_glWaitSemaphoreEXT{nullptr};
+  bool m_hasGLSemaphoreFd{false};
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -209,6 +265,13 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_colorSpace.transfer = pl_transfer_from_av(picture.color_transfer);
   m_chromaLocation = pl_chroma_from_av(picture.chroma_position);
 
+  
+  // Probe EGL DMA-buf modifier support unconditionally: applies to both VAAPI
+  // and DRMPRIME.  When present, eglCreateImageKHR implicitly attaches the
+  // DMA-buf reservation fence to the EGLImage so the GPU waits automatically —
+  // no explicit CPU stall or GL semaphore is needed.
+  m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
+
 #if defined(HAVE_LIBVA)
   m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
   if (m_isVAAPI)
@@ -220,7 +283,6 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
         reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
     m_glEGLImageTargetTexture2DOES = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
         eglGetProcAddress("glEGLImageTargetTexture2DOES"));
-    m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
   }
 #endif
 
@@ -251,6 +313,40 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_cachedFboW = 0;
   m_cachedFboH = 0;
   m_kodiVaoCached = false;
+  m_glStateCached = false;
+
+  // Detect GL_KHR_no_error: if the context was created with no-error mode,
+  // glGetError() is a no-op and we can skip the pre-render drain entirely.
+  {
+    GLint ctxFlags = 0;
+    glGetIntegerv(GL_CONTEXT_FLAGS, &ctxFlags);
+    m_glNoError = (ctxFlags & GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR) != 0;
+  }
+
+  // Probe GL_EXT_semaphore + GL_EXT_semaphore_fd.
+  // Used by both VAAPI (replaces vaSyncSurface() CPU stall) and DRMPRIME
+  // (adds explicit GPU-side sync for V4L2/VC4 decode fences on RPi5 etc.).
+  // Only meaningful when DMA_BUF_IOCTL_EXPORT_SYNC_FILE is also available
+  // at compile time (kernel ≥ 5.2 headers); the runtime ioctl call provides
+  // its own fallback to vaSyncSurface() / no-sync if the ioctl fails.
+  {
+    auto* gen = eglGetProcAddress("glGenSemaphoresEXT");
+    auto* del = eglGetProcAddress("glDeleteSemaphoresEXT");
+    auto* imp = eglGetProcAddress("glImportSemaphoreFdEXT");
+    auto* wai = eglGetProcAddress("glWaitSemaphoreEXT");
+    if (gen && del && imp && wai)
+    {
+      m_glGenSemaphoresEXT = reinterpret_cast<FnGlGenSemaphoresEXT>(gen);
+      m_glDeleteSemaphoresEXT = reinterpret_cast<FnGlDeleteSemaphoresEXT>(del);
+      m_glImportSemaphoreFdEXT = reinterpret_cast<FnGlImportSemaphoreFdEXT>(imp);
+      m_glWaitSemaphoreEXT = reinterpret_cast<FnGlWaitSemaphoreEXT>(wai);
+      m_hasGLSemaphoreFd = true;
+    }
+    else
+    {
+      m_hasGLSemaphoreFd = false;
+    }
+  }
 
   return true;
 }
@@ -280,6 +376,8 @@ bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
   m_cachedFboW = 0;
   m_cachedFboH = 0;
   // VAO is stable across seeks; no need to invalidate m_kodiVaoCached.
+  // Viewport/scissor state is window-level; invalidate conservatively.
+  m_glStateCached = false;
   return TBase::Flush(saveBuffers);
 }
 
@@ -582,13 +680,34 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     }
 
     VADisplay vadsp = vaaPic->vadsp;
-    // When DMA-buf implicit fencing is present (signalled by eglQueryDmaBufModifiersEXT
-    // support), the kernel synchronises cross-device access via DMA-buf fence objects.
-    // vaSyncSurface() is a blocking CPU stall that waits for the VAAPI decode engine
-    // to finish; with implicit fencing the EGL/KMS stack already handles this, so the
-    // stall is redundant and wastes several milliseconds per frame on busy decoders.
+    // Synchronise the VAAPI surface before we import its DMA-bufs.
+    //
+    // Priority order (best → worst):
+    //  1. Implicit fencing (m_hasEGLModifiers): the kernel/EGL stack inserts a
+    //     DMA-buf fence automatically when eglCreateImageKHR is called.  No
+    //     explicit sync needed at all.
+    //  2. GL_EXT_semaphore_fd (m_hasGLSemaphoreFd): export a sync-file fd from
+    //     the DMA-buf via DMA_BUF_IOCTL_EXPORT_SYNC_FILE, then import it as a
+    //     GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+    //     wait into the GPU command stream — the CPU thread returns immediately.
+    //  3. vaSyncSurface(): CPU-blocking stall.  Used only when neither of the
+    //     above is available.
     if (!m_hasEGLModifiers)
-      vaSyncSurface(vadsp, surface);
+    {
+      bool syncHandled = false;
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+      if (m_hasGLSemaphoreFd)
+      {
+        // vaExportSurfaceHandle (called below) gives us the DMA-buf fds.
+        // We need to export the fence AFTER vaExportSurfaceHandle so the
+        // descriptor is populated.  Defer to after the export call by setting
+        // a flag; we'll do the ioctl there.
+        syncHandled = true; // fence will be created after vaExportSurfaceHandle
+      }
+#endif
+      if (!syncHandled)
+        vaSyncSurface(vadsp, surface);
+    }
 
     VADRMPRIMESurfaceDescriptor desc{};
     VAStatus vaStatus = vaExportSurfaceHandle(
@@ -605,6 +724,40 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
         std::min(desc.num_objects, static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
     for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
       plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
+
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+    // GL_EXT_semaphore_fd path: export a read fence from the first DMA-buf
+    // object and import it as a GL semaphore.  glWaitSemaphoreEXT (called in
+    // RenderHook) submits the wait to the GPU command stream asynchronously —
+    // the CPU is not stalled here.
+    if (!m_hasEGLModifiers && m_hasGLSemaphoreFd && plbuf.vaapiNumFds > 0)
+    {
+      dma_buf_export_sync_file syncExport{};
+      syncExport.flags = DMA_BUF_SYNC_READ;
+      syncExport.fd = -1;
+      if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
+          syncExport.fd >= 0)
+      {
+        GLuint sem = 0;
+        m_glGenSemaphoresEXT(1, &sem);
+        // The fd is consumed (transferred to the GL driver) by the import call.
+        m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
+        plbuf.fenceSemaphore = sem;
+        // Populate the texture barrier list: all VAAPI plane textures.
+        plbuf.nFenceTextures = 0;
+        for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
+        {
+          if (plbuf.vaapiGLTex[n])
+            plbuf.fenceTextures[plbuf.nFenceTextures++] = plbuf.vaapiGLTex[n];
+        }
+      }
+      else
+      {
+        // ioctl not available at runtime (older kernel); fall back to CPU sync.
+        vaSyncSurface(vadsp, surface);
+      }
+    }
+#endif
 
     pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
     bool success = true;
@@ -663,7 +816,8 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
       m_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, eglImage);
-      glBindTexture(GL_TEXTURE_2D, 0);
+      // No glBindTexture(0) unbind needed: pl_opengl_wrap (called below) manages
+      // the texture binding itself, and leaving a texture bound is harmless here.
 
       GLenum glIformat = 0;
       switch (layer.drm_format)
@@ -905,6 +1059,39 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     }
 
     plbuf.iFlags = buf.iFlags;
+
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+    // GPU-side fence for the V4L2 / DRMPRIME decode path (e.g. bcm2835-codec on
+    // RPi5).  The VC4/V3D pipeline sets a DMA-buf read fence on the output
+    // buffer when decode completes; we export it as a sync-file and import it
+    // as a GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+    // wait into the GPU command stream without stalling the CPU.
+    //
+    // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
+    // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
+    // reservation fence implicitly — adding an explicit semaphore is redundant.
+    if (m_hasGLSemaphoreFd && !m_hasEGLModifiers)
+    {
+      const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
+      if (desc && desc->nb_objects > 0)
+      {
+        dma_buf_export_sync_file syncExport{};
+        syncExport.flags = DMA_BUF_SYNC_READ;
+        syncExport.fd = -1;
+        if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
+            syncExport.fd >= 0)
+        {
+          GLuint sem = 0;
+          m_glGenSemaphoresEXT(1, &sem);
+          m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
+          plbuf.fenceSemaphore = sem;
+          plbuf.fenceTextures[0] = glTex;
+          plbuf.nFenceTextures = 1;
+        }
+      }
+    }
+#endif
+
     plbuf.loaded = true;
     buf.loaded = true;
     return true;
@@ -1085,6 +1272,8 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     m_cachedFboId = fboId;
     m_cachedFboW = viewW;
     m_cachedFboH = viewH;
+    // FBO change implies the window/surface changed; invalidate cached GL state.
+    m_glStateCached = false;
   }
   pl_tex outTex = m_cachedFboTex;
 
@@ -1117,16 +1306,30 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   pl_render_params params = m_plOpts->params;
   params.border = PL_CLEAR_SKIP;
 
-  // Drain any GL errors so libplacebo's gl_check_err doesn't abort the pass early.
-  while (glGetError() != GL_NO_ERROR)
-    ;
+  // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
+  // a pass early.  Skipped when the context was created with GL_KHR_no_error
+  // (EGL_CONTEXT_OPENGL_NO_ERROR_KHR) since no errors can ever be generated.
+  if (!m_glNoError)
+  {
+    while (glGetError() != GL_NO_ERROR)
+      ;
+  }
 
   // Save GL state that libplacebo modifies but may not restore on error paths.
-  GLint savedViewport[4]{};
-  glGetIntegerv(GL_VIEWPORT, savedViewport);
-  GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
-  GLint savedScissor[4]{};
-  glGetIntegerv(GL_SCISSOR_BOX, savedScissor);
+  // Viewport, scissor enable, and scissor box are CPU-side shadow state in every
+  // known GL/GLES driver (no GPU round-trip), but caching them still removes
+  // 3 function calls from the hot path.  The cache is invalidated whenever the
+  // FBO dimensions change (window resize) or on Configure/Flush.
+  if (!m_glStateCached)
+  {
+    glGetIntegerv(GL_VIEWPORT, m_cachedGLViewport);
+    m_cachedScissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_SCISSOR_BOX, m_cachedGLScissor);
+    m_glStateCached = true;
+  }
+  const GLint* savedViewport = m_cachedGLViewport;
+  const GLboolean scissorWasEnabled = m_cachedScissorEnabled;
+  const GLint* savedScissor = m_cachedGLScissor;
   // libplacebo binds its own VAO per-pass and resets to VAO 0 at exit.
   // In GL/GLES core profile VAO 0 is invalid; restore Kodi's VAO.
   // Cache the result: glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serialises the GPU
@@ -1139,6 +1342,30 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     m_kodiVaoCached = true;
   }
   const GLint savedVAO = m_kodiVAO;
+
+  // GPU-side DMA-buf fence wait (GL_EXT_semaphore_fd).
+  // UploadTexture() may have imported a DMA-buf sync-file fence for VAAPI or
+  // DRMPRIME frames.  Drain all pending semaphores here — after pl_queue_update
+  // has completed its MapCallback chain, before any pl_render_image[_mix]
+  // command touches the textures.  glWaitSemaphoreEXT inserts the wait into the
+  // GPU command stream; the CPU thread returns immediately.
+  if (m_hasGLSemaphoreFd)
+  {
+    for (auto& fbuf : m_plBuffers)
+    {
+      if (!fbuf.fenceSemaphore)
+        continue;
+
+      GLenum layouts[3] = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT,
+                           GL_LAYOUT_GENERAL_EXT};
+      m_glWaitSemaphoreEXT(fbuf.fenceSemaphore, 0, nullptr,
+                            static_cast<GLuint>(fbuf.nFenceTextures),
+                            fbuf.fenceTextures, layouts);
+      m_glDeleteSemaphoresEXT(1, &fbuf.fenceSemaphore);
+      fbuf.fenceSemaphore = 0;
+      fbuf.nFenceTextures = 0;
+    }
+  }
 
   // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF)
   bool rendered = false;
@@ -1213,6 +1440,16 @@ void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
 #if defined(HAVE_LIBVA)
   if (m_isVAAPI)
   {
+    // Drop any pending fence semaphore.  If the wait hasn't fired yet the
+    // semaphore object is simply deleted; the associated sync object is
+    // released by the GL driver without blocking the CPU.
+    if (plbuf.fenceSemaphore && m_glDeleteSemaphoresEXT)
+    {
+      m_glDeleteSemaphoresEXT(1, &plbuf.fenceSemaphore);
+      plbuf.fenceSemaphore = 0;
+      plbuf.nFenceTextures = 0;
+    }
+
     pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
     for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
     {
@@ -1250,6 +1487,14 @@ void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
 
   if (!plbuf.loaded)
     return;
+
+  // Drop any pending fence semaphore (DRMPRIME path).
+  if (plbuf.fenceSemaphore && m_glDeleteSemaphoresEXT)
+  {
+    m_glDeleteSemaphoresEXT(1, &plbuf.fenceSemaphore);
+    plbuf.fenceSemaphore = 0;
+    plbuf.nFenceTextures = 0;
+  }
 
   m_drmTextures[index].Unmap();
 
