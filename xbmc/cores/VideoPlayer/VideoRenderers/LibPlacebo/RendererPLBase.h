@@ -56,6 +56,7 @@ extern "C"
 
 #include <array>
 
+#include <libplacebo/shaders/icc.h>
 #include <libplacebo/utils/libav.h>
 #include <unistd.h>
 
@@ -197,16 +198,17 @@ private:
   // manager) so CMS functions identically regardless of TBase.
   //
   // Two CMS paths are supported:
-  //  • CMS_MODE_PROFILE: raw ICC file bytes are passed to libplacebo via
-  //    frameOut.profile so libplacebo applies its own HDR-aware ICC processing.
+  //  • CMS_MODE_PROFILE: ICC file is opened into m_iccObject via pl_icc_update and
+  //    set on frameOut.icc directly, bypassing the deprecated icc_fallback path.
   //  • CMS_MODE_3DLUT: CColorManager generates a float CLUT that is attached
   //    to frameOut.lut (PL_LUT_NATIVE) as a display-calibration LUT.
   std::unique_ptr<CColorManager> m_plCmsManager;
 
   // ICC profile state (CMS_MODE_PROFILE path)
-  std::vector<uint8_t> m_iccData; ///< Raw ICC file bytes
-  std::string m_iccPath; ///< Path last loaded into m_iccData
-  uint64_t m_iccSignature{0}; ///< Precomputed hash for libplacebo cache
+  pl_icc_object m_iccObject{nullptr}; ///< Parsed ICC object managed by pl_icc_update
+  std::vector<uint8_t> m_iccData; ///< Raw ICC file bytes (kept until pl_icc_update succeeds)
+  std::string m_iccPath; ///< Path last successfully opened into m_iccObject
+  uint64_t m_iccSignature{0}; ///< Precomputed hash for pl_icc_update signature
 
   // 3D LUT state (CMS_MODE_3DLUT path)
   std::vector<float> m_cmsLutData; ///< Float-normalised CLUT samples
@@ -240,7 +242,7 @@ private:
 
   // Reloads the CMS 3D LUT from CColorManager when the token changes.
   void UpdateCmsLut();
-  // Reads the raw ICC file into m_iccData when the path changes.
+  // Opens/updates m_iccObject via pl_icc_update when the ICC path changes.
   void UpdateIccProfile();
 
   // Maps a Kodi ESCALINGMETHOD to the corresponding libplacebo filter preset
@@ -302,6 +304,7 @@ CRendererPLBase<TBase>::~CRendererPLBase()
     pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
+  pl_icc_close(&m_iccObject);
   pl_options_free(&m_plOpts);
   PL::PLInstance::Get()->Reset();
 }
@@ -361,11 +364,19 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   }
   m_queuePtsOffsetSet = false;
 
-  // Invalidate CMS state: source primaries may have changed.
+  // Invalidate CMS state: source primaries may have changed and we are about
+  // to render a new video source.
   m_plCmsToken = -1;
   m_cmsLutValid = false;
-  // Force ICC re-read on next frame so libplacebo picks up any content-driven changes.
+  pl_icc_close(&m_iccObject);
   m_iccPath.clear();
+  m_iccData.clear();
+  m_iccSignature = 0;
+
+  // Flush libplacebo's renderer caches (peak detection, frame mix state) so
+  // the new source starts clean.  Required when switching content.
+  if (auto inst = PL::PLInstance::Get())
+    pl_renderer_flush_cache(inst->GetRenderer());
 
   // Invalidate per-session render caches: the FBO or window size may have changed
   // and Kodi's VAO may have been recreated since the last Configure call.
@@ -753,7 +764,7 @@ void CRendererPLBase<TBase>::UpdateCmsLut()
 }
 
 // ---------------------------------------------------------------------------
-// UpdateIccProfile — read raw ICC file bytes when the path changes
+// UpdateIccProfile — open/update m_iccObject when the ICC path changes
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
@@ -791,15 +802,28 @@ void CRendererPLBase<TBase>::UpdateIccProfile()
   f.Read(m_iccData.data(), size);
   f.Close();
 
-  // Compute signature once so every frame just copies it without re-hashing.
-  pl_icc_profile tmp{};
-  tmp.data = m_iccData.data();
-  tmp.len = m_iccData.size();
-  pl_icc_profile_compute_signature(&tmp);
-  m_iccSignature = tmp.signature;
+  // Compute signature for pl_icc_update's change-detection.
+  pl_icc_profile iccProf{};
+  iccProf.data = m_iccData.data();
+  iccProf.len = m_iccData.size();
+  pl_icc_profile_compute_signature(&iccProf);
+  m_iccSignature = iccProf.signature;
+
+  // Open/update the pl_icc_object via LittleCMS2. Setting frameOut.icc directly
+  // (rather than frameOut.profile) bypasses the deprecated icc_fallback path in
+  // renderer.c and gives us full error visibility on every profile switch.
+  if (!pl_icc_update(PL::PLInstance::Get()->m_plLog, &m_iccObject, &iccProf, nullptr))
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - pl_icc_update failed: {}", path);
+    m_iccData.clear();
+    m_iccSignature = 0;
+    // m_iccPath stays empty so the next frame retries.
+    return;
+  }
 
   m_iccPath = path;
-  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateIccProfile - loaded {} bytes from {}", size, path);
+  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateIccProfile - opened ICC profile ({} bytes): {}", size,
+            path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,22 +1482,23 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   }
 
   // CMS — two paths, both GL and GLES:
-  //  • CMS_MODE_PROFILE: pass raw ICC bytes via frameOut.profile so libplacebo
-  //    applies its own HDR-aware ICC processing (better quality than a sampled LUT).
-  //  • CMS_MODE_3DLUT: use CColorManager's pre-sampled CLUT attached as
+  //  • CMS_MODE_PROFILE: frameOut.icc is set from m_iccObject (opened via
+  //    pl_icc_update in UpdateIccProfile). This uses the direct pl_frame.icc API
+  //    rather than the deprecated pl_frame.profile / icc_fallback path.
+  //  • CMS_MODE_3DLUT: CColorManager's pre-sampled CLUT attached as
   //    frameOut.lut (PL_LUT_NATIVE).
   {
     const auto cmsSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
+    const bool cmsEnabled = cmsSettings->GetBool("videoscreen.cmsenabled");
     const int cmsMode = cmsSettings->GetInt("videoscreen.cmsmode");
-    if (m_plCmsManager->IsEnabled() && cmsMode == CMS_MODE_PROFILE)
+    // For the native ICC path we check settings directly rather than using
+    // m_plCmsManager->IsEnabled(), which internally validates cmslutsize — a
+    // parameter relevant only to the sampled 3D LUT path and not applicable here.
+    if (cmsEnabled && cmsMode == CMS_MODE_PROFILE)
     {
       UpdateIccProfile();
-      if (!m_iccData.empty())
-      {
-        frameOut.profile.data = m_iccData.data();
-        frameOut.profile.len = m_iccData.size();
-        frameOut.profile.signature = m_iccSignature;
-      }
+      if (m_iccObject)
+        frameOut.icc = m_iccObject;
     }
     else
     {
