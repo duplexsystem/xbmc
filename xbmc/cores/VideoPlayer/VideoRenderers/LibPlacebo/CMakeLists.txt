@@ -3,10 +3,10 @@ if(NOT TARGET ${APP_NAME_LC}::Libplacebo)
 endif()
 
 set(SOURCES libav_wrapper.c
-            PlHelper.cpp)
+        PLHelper.cpp)
 
 set(HEADERS
-            PlHelper.h)
+        PLHelper.h)
 
 if(NOT (WIN32 OR WINDOWS_STORE))
   list(APPEND HEADERS RendererPLBase.h)

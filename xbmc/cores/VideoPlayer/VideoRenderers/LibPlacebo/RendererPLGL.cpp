@@ -8,7 +8,7 @@
 
 #include "RendererPLGL.h"
 
-#include "PlHelper.h"
+#include "PLHelper.h"
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "utils/log.h"

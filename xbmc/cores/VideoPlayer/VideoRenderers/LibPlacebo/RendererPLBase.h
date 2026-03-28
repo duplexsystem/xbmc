@@ -12,15 +12,15 @@
 // (LinuxRendererGL.h or LinuxRendererGLES.h) so that renderer-specific types
 // such as CPictureBuffer, RenderMethod, and EShaderFormat are already declared.
 
-#include "PlHelper.h"
+#include "PLHelper.h"
 #include "ServiceBroker.h"
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
 #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
 #include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
-#include "filesystem/File.h"
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
+#include "filesystem/File.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
@@ -153,7 +153,7 @@ private:
   };
   // libplacebo guarantees exactly one of unmap/discard is called per pushed frame.
   // QueuedFrameState must be trivially destructible so raw delete is safe and
-  // no destructor side-effects are silently skipped on the discard path.
+  // no destructor side effects are silently skipped on the discard path.
   static_assert(std::is_trivially_destructible_v<QueuedFrameState>);
 
   pl_queue m_plQueue{nullptr};
@@ -171,7 +171,7 @@ private:
   int m_cachedFboH{0};
 
   // Cached Kodi VAO handle.
-  // glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serialises the GPU command stream on
+  // glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serializes the GPU command stream on
   // tile-based GPUs (Mali / Adreno / PowerVR / Apple GPU) because the driver must
   // finish all in-flight work before reading back a GPU-side integer.  Kodi's VAO
   // is stable for the lifetime of the renderer, so we query it once and cache it.
@@ -204,14 +204,14 @@ private:
   std::unique_ptr<CColorManager> m_plCmsManager;
 
   // ICC profile state (CMS_MODE_PROFILE path)
-  std::vector<uint8_t> m_iccData;     ///< Raw ICC file bytes
-  std::string m_iccPath;              ///< Path last loaded into m_iccData
-  uint64_t m_iccSignature{0};         ///< Precomputed hash for libplacebo cache
+  std::vector<uint8_t> m_iccData; ///< Raw ICC file bytes
+  std::string m_iccPath; ///< Path last loaded into m_iccData
+  uint64_t m_iccSignature{0}; ///< Precomputed hash for libplacebo cache
 
   // 3D LUT state (CMS_MODE_3DLUT path)
-  std::vector<float> m_cmsLutData;    ///< Float-normalised CLUT samples
-  pl_custom_lut m_cmsLut{};           ///< References m_cmsLutData.data()
-  int m_plCmsToken{-1};               ///< Last token from CheckConfiguration; -1 = never loaded
+  std::vector<float> m_cmsLutData; ///< Float-normalised CLUT samples
+  pl_custom_lut m_cmsLut{}; ///< References m_cmsLutData.data()
+  int m_plCmsToken{-1}; ///< Last token from CheckConfiguration; -1 = never loaded
   bool m_cmsLutValid{false};
 
   // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
@@ -942,7 +942,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   }
 
   VADisplay vadsp = vaaPic->vadsp;
-  // Synchronise the VAAPI surface before we import its DMA-bufs.
+  // Synchronize the VAAPI surface before we import its DMA-bufs.
   //
   // Priority order (best → worst):
   //  1. Implicit fencing (m_hasEGLModifiers): the kernel/EGL stack inserts a
@@ -1394,7 +1394,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
 
   // Re-wrap the framebuffer only when it changes.  pl_opengl_wrap/pl_tex_destroy
   // on every frame is expensive: some drivers flush pending GPU work at this point
-  // and libplacebo discards cached per-target state, forcing a full re-initialisation
+  // and libplacebo discards cached per-target state, forcing a full re-initialization
   // on the next pl_render_image[_mix] call.
   if (!m_cachedFboTex || fboId != m_cachedFboId || viewW != m_cachedFboW || viewH != m_cachedFboH)
   {
@@ -1515,7 +1515,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   const GLint* savedScissor = m_cachedGLScissor;
   // libplacebo binds its own VAO per-pass and resets to VAO 0 at exit.
   // In GL/GLES core profile VAO 0 is invalid; restore Kodi's VAO.
-  // Cache the result: glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serialises the GPU
+  // Cache the result: glGetIntegerv(GL_VERTEX_ARRAY_BINDING) serializes the GPU
   // command stream on tile-based GPUs (Mali/Adreno/PowerVR) because the driver
   // must flush in-flight work before reading the register.  Kodi's VAO is created
   // once at startup and never changes, so we query it only on the first render.
