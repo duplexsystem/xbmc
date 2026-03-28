@@ -40,13 +40,13 @@ extern "C"
 #include <libavutil/pixfmt.h>
 }
 
+#include <array>
+
 #include <libplacebo/utils/libav.h>
 #include <unistd.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-
-#include <array>
 
 /**
  * @brief CRTP mixin providing the shared libplacebo renderer implementation.
@@ -172,7 +172,8 @@ CRendererPLBase<TBase>::~CRendererPLBase()
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture, float fps,
+bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
+                                       float fps,
                                        unsigned int orientation)
 {
   if (!TBase::Configure(picture, fps, orientation))
@@ -428,8 +429,7 @@ void CRendererPLBase<TBase>::UpdateVideoFilter()
   static const char* const kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
   if (this->m_videoSettings.m_ToneMapMethod > 0 &&
       this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
-    pl_options_set_str(m_plOpts, "tone_mapping",
-                       kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
+    pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
 
   // Dithering
   applyStr("dither", adv.m_libplaceboDither);
@@ -686,8 +686,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
 
     plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
     if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
-      plbuf.colorRepr.sys =
-          pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+      plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
     plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
     plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
     plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
@@ -1043,9 +1042,8 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     frameOut.color.transfer = PL_COLOR_TRC_BT_1886;
   }
   frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
-  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor()
-                             ? PL_COLOR_LEVELS_LIMITED
-                             : PL_COLOR_LEVELS_FULL;
+  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
+                                                                           : PL_COLOR_LEVELS_FULL;
 
   pl_render_params params = m_plOpts->params;
   params.border = PL_CLEAR_SKIP;
@@ -1070,8 +1068,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   if (m_plQueue && m_queuePtsOffsetSet)
   {
     const auto& buf = this->m_buffers[idx];
-    const float vsyncDuration =
-        1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+    const float vsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
 
     pl_queue_params qparams{};
     qparams.pts = buf.pts - m_queuePtsOffset;

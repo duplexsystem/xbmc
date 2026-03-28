@@ -43,10 +43,9 @@ CBaseRenderer* CRendererPLGLES::Create(CVideoBuffer* buffer)
 
   if (!isDRMPRIME && !isVAAPI && !isSW)
   {
-    CLog::Log(
-        LOGDEBUG,
-        "CRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
-        static_cast<int>(buffer->GetFormat()));
+    CLog::Log(LOGDEBUG,
+              "CRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
+              static_cast<int>(buffer->GetFormat()));
     return nullptr;
   }
 
