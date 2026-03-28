@@ -48,6 +48,7 @@
 
 extern "C"
 {
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 }
 
@@ -148,6 +149,10 @@ private:
     int bufferIndex;
     CRendererPLBase* renderer;
   };
+  // libplacebo guarantees exactly one of unmap/discard is called per pushed frame.
+  // QueuedFrameState must be trivially destructible so raw delete is safe and
+  // no destructor side-effects are silently skipped on the discard path.
+  static_assert(std::is_trivially_destructible_v<QueuedFrameState>);
 
   pl_queue m_plQueue{nullptr};
   double m_queuePtsOffset{0.0};
@@ -206,6 +211,23 @@ private:
   FnGlImportSemaphoreFdEXT m_glImportSemaphoreFdEXT{nullptr};
   FnGlWaitSemaphoreEXT m_glWaitSemaphoreEXT{nullptr};
   bool m_hasGLSemaphoreFd{false};
+
+  static void ApplyHdrMetadata(PLBuffer& pb, const auto& b);
+
+  bool UploadVAAPI(int index, PLBuffer& plbuf);
+  bool UploadDRMPRIME(int index, PLBuffer& plbuf);
+  bool UploadSoftware(int index, PLBuffer& plbuf);
+
+  static constexpr pl_rotation RotationFromOrientation(unsigned int deg)
+  {
+    switch (deg)
+    {
+      case 90:  return PL_ROTATION_270;
+      case 180: return PL_ROTATION_180;
+      case 270: return PL_ROTATION_90;
+      default:  return PL_ROTATION_0;
+    }
+  }
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -443,21 +465,7 @@ bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   out->repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(out, r->m_chromaLocation);
 
-  switch (r->m_renderOrientation)
-  {
-    case 90:
-      out->rotation = PL_ROTATION_270;
-      break;
-    case 180:
-      out->rotation = PL_ROTATION_180;
-      break;
-    case 270:
-      out->rotation = PL_ROTATION_90;
-      break;
-    default:
-      out->rotation = PL_ROTATION_0;
-      break;
-  }
+  out->rotation = CRendererPLBase<TBase>::RotationFromOrientation(r->m_renderOrientation);
 
   // pl_queue sets out->field after map() returns based on first_field splitting.
   out->field = PL_FIELD_NONE;
@@ -656,409 +664,445 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     return true;
   ReleasePLBuffer(index);
 
-  // Shared HDR/DoVi metadata applicator — identical across VAAPI/DRMPRIME/SW paths.
-  auto applyHdrMetadata = [](PLBuffer& pb, const auto& b)
+#if defined(HAVE_LIBVA)
+  if (m_isVAAPI)
+    return UploadVAAPI(index, plbuf);
+#endif
+
+  if (m_isDRMPRIME)
+    return UploadDRMPRIME(index, plbuf);
+
+  return UploadSoftware(index, plbuf);
+}
+
+// ---------------------------------------------------------------------------
+// ApplyHdrMetadata — shared HDR/DoVi metadata for all upload paths
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::ApplyHdrMetadata(PLBuffer& pb, const auto& b)
+{
+  if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
+      b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
   {
-    if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-        b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+    pl_hdr_metadata& hdr = pb.colorSpace.hdr;
+    hdr = {};
+    if (b.hasDisplayMetadata)
     {
-      pl_hdr_metadata& hdr = pb.colorSpace.hdr;
-      hdr = {};
-      if (b.hasDisplayMetadata)
+      const auto& m = b.displayMetadata;
+      hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+      hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
+      hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
+      hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
+      hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+      hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
+      hdr.prim.white.x = av_q2d(m.white_point[0]);
+      hdr.prim.white.y = av_q2d(m.white_point[1]);
+      if (m.has_luminance)
       {
-        const auto& m = b.displayMetadata;
-        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
-        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
-        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
-        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
-        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
-        hdr.prim.white.x = av_q2d(m.white_point[0]);
-        hdr.prim.white.y = av_q2d(m.white_point[1]);
-        if (m.has_luminance)
-        {
-          hdr.max_luma = av_q2d(m.max_luminance);
-          hdr.min_luma = av_q2d(m.min_luminance);
-        }
-      }
-      if (b.hasLightMetadata)
-      {
-        hdr.max_cll = b.lightMetadata.MaxCLL;
-        hdr.max_fall = b.lightMetadata.MaxFALL;
+        hdr.max_luma = av_q2d(m.max_luminance);
+        hdr.min_luma = av_q2d(m.min_luminance);
       }
     }
-    if (!pl_hdr_metadata_equal(&b.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
-        b.plColorRepr.dovi != nullptr)
+    if (b.hasLightMetadata)
     {
-      if (b.plColorRepr.dovi != nullptr)
-      {
-        pb.colorSpace = b.plColorSpace;
-        pb.colorRepr = b.plColorRepr;
-        pb.doviMetadata = b.plDoviMetadata;
-        pb.colorRepr.dovi = &pb.doviMetadata;
-      }
-      else
-      {
-        pl_hdr_metadata_merge(&pb.colorSpace.hdr, &b.plColorSpace.hdr);
-      }
+      hdr.max_cll = b.lightMetadata.MaxCLL;
+      hdr.max_fall = b.lightMetadata.MaxFALL;
     }
-  };
+  }
+  if (!pl_hdr_metadata_equal(&b.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+      b.plColorRepr.dovi != nullptr)
+  {
+    if (b.plColorRepr.dovi != nullptr)
+    {
+      pb.colorSpace = b.plColorSpace;
+      pb.colorRepr = b.plColorRepr;
+      pb.doviMetadata = b.plDoviMetadata;
+      pb.colorRepr.dovi = &pb.doviMetadata;
+    }
+    else
+    {
+      pl_hdr_metadata_merge(&pb.colorSpace.hdr, &b.plColorSpace.hdr);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UploadVAAPI — VAAPI: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap
+// ---------------------------------------------------------------------------
 
 #if defined(HAVE_LIBVA)
-  // --- VAAPI path: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap ---
-  if (m_isVAAPI)
+template<typename TBase>
+bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
+{
+  auto& buf = this->m_buffers[index];
+
+  auto* vaaPic = dynamic_cast<VAAPI::CVaapiRenderPicture*>(buf.videoBuffer);
+  if (!vaaPic)
+    return false;
+
+  if (!m_eglCreateImageKHR || !m_eglDestroyImageKHR || !m_glEGLImageTargetTexture2DOES)
   {
-    auto* vaaPic = dynamic_cast<VAAPI::CVaapiRenderPicture*>(buf.videoBuffer);
-    if (!vaaPic)
-      return false;
+    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - EGL interop not available");
+    return false;
+  }
 
-    if (!m_eglCreateImageKHR || !m_eglDestroyImageKHR || !m_glEGLImageTargetTexture2DOES)
-    {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - EGL interop not available for VAAPI");
-      return false;
-    }
+  VASurfaceID surface = vaaPic->procPic.videoSurface;
+  if (surface == VA_INVALID_ID && vaaPic->avFrame)
+    surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(vaaPic->avFrame->data[3]));
+  if (surface == VA_INVALID_ID)
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - no valid VAAPI surface");
+    return false;
+  }
 
-    VASurfaceID surface = vaaPic->procPic.videoSurface;
-    if (surface == VA_INVALID_ID && vaaPic->avFrame)
-      surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(vaaPic->avFrame->data[3]));
-    if (surface == VA_INVALID_ID)
-    {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - no valid VAAPI surface");
-      return false;
-    }
-
-    VADisplay vadsp = vaaPic->vadsp;
-    // Synchronise the VAAPI surface before we import its DMA-bufs.
-    //
-    // Priority order (best → worst):
-    //  1. Implicit fencing (m_hasEGLModifiers): the kernel/EGL stack inserts a
-    //     DMA-buf fence automatically when eglCreateImageKHR is called.  No
-    //     explicit sync needed at all.
-    //  2. GL_EXT_semaphore_fd (m_hasGLSemaphoreFd): export a sync-file fd from
-    //     the DMA-buf via DMA_BUF_IOCTL_EXPORT_SYNC_FILE, then import it as a
-    //     GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
-    //     wait into the GPU command stream — the CPU thread returns immediately.
-    //  3. vaSyncSurface(): CPU-blocking stall.  Used only when neither of the
-    //     above is available.
-    if (!m_hasEGLModifiers)
-    {
-      bool syncHandled = false;
+  VADisplay vadsp = vaaPic->vadsp;
+  // Synchronise the VAAPI surface before we import its DMA-bufs.
+  //
+  // Priority order (best → worst):
+  //  1. Implicit fencing (m_hasEGLModifiers): the kernel/EGL stack inserts a
+  //     DMA-buf fence automatically when eglCreateImageKHR is called.  No
+  //     explicit sync needed at all.
+  //  2. GL_EXT_semaphore_fd (m_hasGLSemaphoreFd): export a sync-file fd from
+  //     the DMA-buf via DMA_BUF_IOCTL_EXPORT_SYNC_FILE, then import it as a
+  //     GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+  //     wait into the GPU command stream — the CPU thread returns immediately.
+  //  3. vaSyncSurface(): CPU-blocking stall.  Used only when neither of the
+  //     above is available.
+  if (!m_hasEGLModifiers)
+  {
+    bool syncHandled = false;
 #if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-      if (m_hasGLSemaphoreFd)
-      {
-        // vaExportSurfaceHandle (called below) gives us the DMA-buf fds.
-        // We need to export the fence AFTER vaExportSurfaceHandle so the
-        // descriptor is populated.  Defer to after the export call by setting
-        // a flag; we'll do the ioctl there.
-        syncHandled = true; // fence will be created after vaExportSurfaceHandle
-      }
+    if (m_hasGLSemaphoreFd)
+    {
+      // vaExportSurfaceHandle (called below) gives us the DMA-buf fds.
+      // We need to export the fence AFTER vaExportSurfaceHandle so the
+      // descriptor is populated.  Defer to after the export call by setting
+      // a flag; we'll do the ioctl there.
+      syncHandled = true; // fence will be created after vaExportSurfaceHandle
+    }
 #endif
-      if (!syncHandled)
-        vaSyncSurface(vadsp, surface);
-    }
+    if (!syncHandled)
+      vaSyncSurface(vadsp, surface);
+  }
 
-    VADRMPRIMESurfaceDescriptor desc{};
-    VAStatus vaStatus = vaExportSurfaceHandle(
-        vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
-    if (vaStatus != VA_STATUS_SUCCESS)
-    {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - vaExportSurfaceHandle failed: {}",
-                vaErrorStr(vaStatus));
-      return false;
-    }
+  VADRMPRIMESurfaceDescriptor desc{};
+  VAStatus vaStatus = vaExportSurfaceHandle(
+      vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
+  if (vaStatus != VA_STATUS_SUCCESS)
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - vaExportSurfaceHandle failed: {}",
+              vaErrorStr(vaStatus));
+    return false;
+  }
 
-    plbuf.vaapiNumFds = static_cast<int>(
-        std::min(desc.num_objects, static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
-    for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
-      plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
+  plbuf.vaapiNumFds = static_cast<int>(
+      std::min(desc.num_objects, static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
+  for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
+    plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
 
 #if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-    // GL_EXT_semaphore_fd path: export a read fence from the first DMA-buf
-    // object and import it as a GL semaphore.  glWaitSemaphoreEXT (called in
-    // RenderHook) submits the wait to the GPU command stream asynchronously —
-    // the CPU is not stalled here.
-    if (!m_hasEGLModifiers && m_hasGLSemaphoreFd && plbuf.vaapiNumFds > 0)
+  // GL_EXT_semaphore_fd path: export a read fence from the first DMA-buf
+  // object and import it as a GL semaphore.  glWaitSemaphoreEXT (called in
+  // RenderHook) submits the wait to the GPU command stream asynchronously —
+  // the CPU is not stalled here.
+  if (!m_hasEGLModifiers && m_hasGLSemaphoreFd && plbuf.vaapiNumFds > 0)
+  {
+    dma_buf_export_sync_file syncExport{};
+    syncExport.flags = DMA_BUF_SYNC_READ;
+    syncExport.fd = -1;
+    if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
+        syncExport.fd >= 0)
+    {
+      GLuint sem = 0;
+      m_glGenSemaphoresEXT(1, &sem);
+      // The fd is consumed (transferred to the GL driver) by the import call.
+      m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
+      plbuf.fenceSemaphore = sem;
+      // Populate the texture barrier list: all VAAPI plane textures.
+      plbuf.nFenceTextures = 0;
+      for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
+      {
+        if (plbuf.vaapiGLTex[n])
+          plbuf.fenceTextures[plbuf.nFenceTextures++] = plbuf.vaapiGLTex[n];
+      }
+    }
+    else
+    {
+      // ioctl not available at runtime (older kernel); fall back to CPU sync.
+      vaSyncSurface(vadsp, surface);
+    }
+  }
+#endif
+
+  const auto plInst = PL::PLInstance::Get();
+  pl_gpu gpu = plInst->GetGpu();
+  const GLenum vaapiTexTarget = GetVaapiTexTarget();
+  bool success = true;
+  const uint32_t numLayers = std::min(desc.num_layers, 3u);
+  glGenTextures(static_cast<GLsizei>(numLayers), plbuf.vaapiGLTex);
+
+  for (uint32_t i = 0; i < numLayers && success; ++i)
+  {
+    const auto& layer = desc.layers[i];
+    const auto& object = desc.objects[layer.object_index[0]];
+
+    const EGLint planeW =
+        (i == 0) ? static_cast<EGLint>(desc.width) : (static_cast<EGLint>(desc.width) + 1) / 2;
+    const EGLint planeH =
+        (i == 0) ? static_cast<EGLint>(desc.height) : (static_cast<EGLint>(desc.height) + 1) / 2;
+
+    // 6 mandatory attribute pairs + 2 optional modifier pairs + EGL_NONE terminator
+    static constexpr int kEGLAttribsMax = 6 * 2 + 2 * 2 + 1;
+    static_assert(kEGLAttribsMax == 17, "Update kEGLAttribsMax if adding more EGL attributes");
+    EGLint attribs[kEGLAttribsMax];
+    EGLint* a = attribs;
+    *a++ = EGL_LINUX_DRM_FOURCC_EXT;
+    *a++ = static_cast<EGLint>(layer.drm_format);
+    *a++ = EGL_WIDTH;
+    *a++ = planeW;
+    *a++ = EGL_HEIGHT;
+    *a++ = planeH;
+    *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
+    *a++ = object.fd;
+    *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+    *a++ = static_cast<EGLint>(layer.offset[0]);
+    *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+    *a++ = static_cast<EGLint>(layer.pitch[0]);
+    if (m_hasEGLModifiers && object.drm_format_modifier != DRM_FORMAT_MOD_INVALID)
+    {
+      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+      *a++ = static_cast<EGLint>(object.drm_format_modifier & 0xFFFFFFFFu);
+      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+      *a++ = static_cast<EGLint>(object.drm_format_modifier >> 32);
+    }
+    *a++ = EGL_NONE;
+
+    EGLImageKHR eglImage = m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT,
+                                               EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    if (!eglImage)
+    {
+      CLog::Log(LOGERROR,
+                "CRendererPLBase::UploadVAAPI - eglCreateImageKHR failed for plane {} "
+                "(EGL error 0x{:x})",
+                i, static_cast<unsigned>(eglGetError()));
+      success = false;
+      break;
+    }
+    plbuf.vaapiEGLImage[i] = eglImage;
+
+    glBindTexture(vaapiTexTarget, plbuf.vaapiGLTex[i]);
+    glTexParameteri(vaapiTexTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(vaapiTexTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
+    // No glBindTexture(0) unbind needed: pl_opengl_wrap (called below) manages
+    // the texture binding itself, and leaving a texture bound is harmless here.
+
+    GLenum glIformat = 0;
+    switch (layer.drm_format)
+    {
+      case DRM_FORMAT_R8:
+        glIformat = GL_R8;
+        break;
+      case DRM_FORMAT_GR88:
+        glIformat = GL_RG8;
+        break;
+      case DRM_FORMAT_R16:
+        glIformat = GL_R16;
+        break;
+      case DRM_FORMAT_GR1616:
+        glIformat = GL_RG16;
+        break;
+      default:
+        CLog::Log(LOGERROR,
+                  "CRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
+                  layer.drm_format, i);
+        success = false;
+        break;
+    }
+    if (!success)
+      break;
+
+    pl_opengl_wrap_params wp{};
+    wp.texture = plbuf.vaapiGLTex[i];
+    wp.target = vaapiTexTarget; // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
+    wp.iformat = static_cast<int>(glIformat);
+    wp.width = planeW;
+    wp.height = planeH;
+
+    plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
+    if (!plbuf.tex[i])
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}", i);
+      success = false;
+    }
+  }
+
+  if (!success)
+  {
+    ReleasePLBuffer(index);
+    return false;
+  }
+
+  plbuf.num_planes = static_cast<int>(numLayers);
+
+  plbuf.planes[0] = {};
+  plbuf.planes[0].texture = plbuf.tex[0];
+  plbuf.planes[0].components = 1;
+  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  plbuf.planes[0].flipped = true;
+
+  if (numLayers > 1)
+  {
+    plbuf.planes[1] = {};
+    plbuf.planes[1].texture = plbuf.tex[1];
+    plbuf.planes[1].components = 2;
+    plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+    plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+    plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[1].flipped = true;
+  }
+
+  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
+  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
+    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+
+  switch (desc.fourcc)
+  {
+    case VA_FOURCC_P010:
+      plbuf.colorRepr.bits = {16, 10, 6};
+      break;
+    case VA_FOURCC_P016:
+      plbuf.colorRepr.bits = {16, 16, 0};
+      break;
+    default:
+      break;
+  }
+
+  ApplyHdrMetadata(plbuf, buf);
+
+  plbuf.iFlags = buf.iFlags;
+  plbuf.loaded = true;
+  buf.loaded = true;
+  return true;
+}
+#endif // HAVE_LIBVA
+
+// ---------------------------------------------------------------------------
+// UploadDRMPRIME — DMA-buf → single combined OES texture → pl_tex
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
+{
+  auto& buf = this->m_buffers[index];
+
+  auto* drmBuf = dynamic_cast<CVideoBufferDRMPRIME*>(buf.videoBuffer);
+  if (!drmBuf)
+    return false;
+
+  m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
+  if (!m_drmTextures[index].Map(drmBuf))
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UploadDRMPRIME - CDRMPRIMETexture::Map failed");
+    return false;
+  }
+
+  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  GLuint glTex = m_drmTextures[index].GetTexture();
+  CSizeInt sz = m_drmTextures[index].GetTextureSize();
+
+  pl_opengl_wrap_params wp{};
+  wp.texture = glTex;
+  wp.target = GL_TEXTURE_EXTERNAL_OES;
+  wp.iformat = GL_RGBA8;
+  wp.width = sz.Width();
+  wp.height = sz.Height();
+
+  plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
+  if (!plbuf.tex[0])
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UploadDRMPRIME - pl_opengl_wrap failed");
+    m_drmTextures[index].Unmap();
+    return false;
+  }
+
+  plbuf.planes[0] = {};
+  plbuf.planes[0].texture = plbuf.tex[0];
+  plbuf.planes[0].components = 3;
+  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_R;
+  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_G;
+  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_B;
+  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  plbuf.num_planes = 1;
+
+  // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
+  // yielding RGB in the source primaries/transfer. Tell libplacebo this is RGB.
+  plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
+  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+
+  ApplyHdrMetadata(plbuf, buf);
+
+  plbuf.iFlags = buf.iFlags;
+
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+  // GPU-side fence for the V4L2 / DRMPRIME decode path (e.g. bcm2835-codec on
+  // RPi5).  The VC4/V3D pipeline sets a DMA-buf read fence on the output
+  // buffer when decode completes; we export it as a sync-file and import it
+  // as a GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+  // wait into the GPU command stream without stalling the CPU.
+  //
+  // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
+  // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
+  // reservation fence implicitly — adding an explicit semaphore is redundant.
+  if (m_hasGLSemaphoreFd && !m_hasEGLModifiers)
+  {
+    const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
+    if (desc && desc->nb_objects > 0)
     {
       dma_buf_export_sync_file syncExport{};
       syncExport.flags = DMA_BUF_SYNC_READ;
       syncExport.fd = -1;
-      if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
+      if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
           syncExport.fd >= 0)
       {
         GLuint sem = 0;
         m_glGenSemaphoresEXT(1, &sem);
-        // The fd is consumed (transferred to the GL driver) by the import call.
         m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
         plbuf.fenceSemaphore = sem;
-        // Populate the texture barrier list: all VAAPI plane textures.
-        plbuf.nFenceTextures = 0;
-        for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
-        {
-          if (plbuf.vaapiGLTex[n])
-            plbuf.fenceTextures[plbuf.nFenceTextures++] = plbuf.vaapiGLTex[n];
-        }
-      }
-      else
-      {
-        // ioctl not available at runtime (older kernel); fall back to CPU sync.
-        vaSyncSurface(vadsp, surface);
+        plbuf.fenceTextures[0] = glTex;
+        plbuf.nFenceTextures = 1;
       }
     }
-#endif
-
-    const auto plInst = PL::PLInstance::Get();
-    pl_gpu gpu = plInst->GetGpu();
-    const GLenum vaapiTexTarget = GetVaapiTexTarget();
-    bool success = true;
-    const uint32_t numLayers = std::min(desc.num_layers, 3u);
-    glGenTextures(static_cast<GLsizei>(numLayers), plbuf.vaapiGLTex);
-
-    for (uint32_t i = 0; i < numLayers && success; ++i)
-    {
-      const auto& layer = desc.layers[i];
-      const auto& object = desc.objects[layer.object_index[0]];
-
-      const EGLint planeW =
-          (i == 0) ? static_cast<EGLint>(desc.width) : (static_cast<EGLint>(desc.width) + 1) / 2;
-      const EGLint planeH =
-          (i == 0) ? static_cast<EGLint>(desc.height) : (static_cast<EGLint>(desc.height) + 1) / 2;
-
-      EGLint attribs[17];
-      EGLint* a = attribs;
-      *a++ = EGL_LINUX_DRM_FOURCC_EXT;
-      *a++ = static_cast<EGLint>(layer.drm_format);
-      *a++ = EGL_WIDTH;
-      *a++ = planeW;
-      *a++ = EGL_HEIGHT;
-      *a++ = planeH;
-      *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
-      *a++ = object.fd;
-      *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-      *a++ = static_cast<EGLint>(layer.offset[0]);
-      *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-      *a++ = static_cast<EGLint>(layer.pitch[0]);
-      if (m_hasEGLModifiers && object.drm_format_modifier != DRM_FORMAT_MOD_INVALID)
-      {
-        *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-        *a++ = static_cast<EGLint>(object.drm_format_modifier & 0xFFFFFFFFu);
-        *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-        *a++ = static_cast<EGLint>(object.drm_format_modifier >> 32);
-      }
-      *a++ = EGL_NONE;
-
-      EGLImageKHR eglImage = m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT,
-                                                 EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
-      if (!eglImage)
-      {
-        CLog::Log(LOGERROR,
-                  "CRendererPLBase::UploadTexture - eglCreateImageKHR failed for VAAPI plane {} "
-                  "(EGL error 0x{:x})",
-                  i, static_cast<unsigned>(eglGetError()));
-        success = false;
-        break;
-      }
-      plbuf.vaapiEGLImage[i] = eglImage;
-
-      glBindTexture(vaapiTexTarget, plbuf.vaapiGLTex[i]);
-      glTexParameteri(vaapiTexTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(vaapiTexTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
-      // No glBindTexture(0) unbind needed: pl_opengl_wrap (called below) manages
-      // the texture binding itself, and leaving a texture bound is harmless here.
-
-      GLenum glIformat = 0;
-      switch (layer.drm_format)
-      {
-        case DRM_FORMAT_R8:
-          glIformat = GL_R8;
-          break;
-        case DRM_FORMAT_GR88:
-          glIformat = GL_RG8;
-          break;
-        case DRM_FORMAT_R16:
-          glIformat = GL_R16;
-          break;
-        case DRM_FORMAT_GR1616:
-          glIformat = GL_RG16;
-          break;
-        default:
-          CLog::Log(LOGERROR,
-                    "CRendererPLBase::UploadTexture - unsupported DRM fourcc 0x{:x} for VAAPI "
-                    "plane {}",
-                    layer.drm_format, i);
-          success = false;
-          break;
-      }
-      if (!success)
-        break;
-
-      pl_opengl_wrap_params wp{};
-      wp.texture = plbuf.vaapiGLTex[i];
-      wp.target = vaapiTexTarget; // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
-      wp.iformat = static_cast<int>(glIformat);
-      wp.width = planeW;
-      wp.height = planeH;
-
-      plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
-      if (!plbuf.tex[i])
-      {
-        CLog::Log(LOGERROR,
-                  "CRendererPLBase::UploadTexture - pl_opengl_wrap failed for VAAPI plane {}", i);
-        success = false;
-      }
-    }
-
-    if (!success)
-    {
-      ReleasePLBuffer(index);
-      return false;
-    }
-
-    plbuf.num_planes = static_cast<int>(numLayers);
-
-    plbuf.planes[0] = {};
-    plbuf.planes[0].texture = plbuf.tex[0];
-    plbuf.planes[0].components = 1;
-    plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
-    plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
-    plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
-    plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
-    plbuf.planes[0].flipped = true;
-
-    if (numLayers > 1)
-    {
-      plbuf.planes[1] = {};
-      plbuf.planes[1].texture = plbuf.tex[1];
-      plbuf.planes[1].components = 2;
-      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
-      plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
-      plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
-      plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
-      plbuf.planes[1].flipped = true;
-    }
-
-    plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
-    if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
-      plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
-    plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-    plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-    plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
-
-    switch (desc.fourcc)
-    {
-      case VA_FOURCC_P010:
-        plbuf.colorRepr.bits = {16, 10, 6};
-        break;
-      case VA_FOURCC_P016:
-        plbuf.colorRepr.bits = {16, 16, 0};
-        break;
-      default:
-        break;
-    }
-
-    applyHdrMetadata(plbuf, buf);
-
-    plbuf.iFlags = buf.iFlags;
-    plbuf.loaded = true;
-    buf.loaded = true;
-    return true;
   }
 #endif
 
-  // --- DRMPRIME path: DMA-buf → single combined OES texture → pl_tex ---
-  if (m_isDRMPRIME)
-  {
-    auto* drmBuf = dynamic_cast<CVideoBufferDRMPRIME*>(buf.videoBuffer);
-    if (!drmBuf)
-      return false;
+  plbuf.loaded = true;
+  buf.loaded = true;
+  return true;
+}
 
-    m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
-    if (!m_drmTextures[index].Map(drmBuf))
-    {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - CDRMPRIMETexture::Map failed");
-      return false;
-    }
+// ---------------------------------------------------------------------------
+// UploadSoftware — CPU→GPU upload via pl_upload_plane
+// ---------------------------------------------------------------------------
 
-    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
-    GLuint glTex = m_drmTextures[index].GetTexture();
-    CSizeInt sz = m_drmTextures[index].GetTextureSize();
+template<typename TBase>
+bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
+{
+  auto& buf = this->m_buffers[index];
 
-    pl_opengl_wrap_params wp{};
-    wp.texture = glTex;
-    wp.target = GL_TEXTURE_EXTERNAL_OES;
-    wp.iformat = GL_RGBA8;
-    wp.width = sz.Width();
-    wp.height = sz.Height();
-
-    plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
-    if (!plbuf.tex[0])
-    {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - pl_opengl_wrap failed for DRMPRIME");
-      m_drmTextures[index].Unmap();
-      return false;
-    }
-
-    plbuf.planes[0] = {};
-    plbuf.planes[0].texture = plbuf.tex[0];
-    plbuf.planes[0].components = 3;
-    plbuf.planes[0].component_mapping[0] = PL_CHANNEL_R;
-    plbuf.planes[0].component_mapping[1] = PL_CHANNEL_G;
-    plbuf.planes[0].component_mapping[2] = PL_CHANNEL_B;
-    plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
-    plbuf.num_planes = 1;
-
-    // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
-    // yielding RGB in the source primaries/transfer. Tell libplacebo this is RGB.
-    plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
-    plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-    plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-    plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
-
-    applyHdrMetadata(plbuf, buf);
-
-    plbuf.iFlags = buf.iFlags;
-
-#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-    // GPU-side fence for the V4L2 / DRMPRIME decode path (e.g. bcm2835-codec on
-    // RPi5).  The VC4/V3D pipeline sets a DMA-buf read fence on the output
-    // buffer when decode completes; we export it as a sync-file and import it
-    // as a GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
-    // wait into the GPU command stream without stalling the CPU.
-    //
-    // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
-    // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
-    // reservation fence implicitly — adding an explicit semaphore is redundant.
-    if (m_hasGLSemaphoreFd && !m_hasEGLModifiers)
-    {
-      const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
-      if (desc && desc->nb_objects > 0)
-      {
-        dma_buf_export_sync_file syncExport{};
-        syncExport.flags = DMA_BUF_SYNC_READ;
-        syncExport.fd = -1;
-        if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
-            syncExport.fd >= 0)
-        {
-          GLuint sem = 0;
-          m_glGenSemaphoresEXT(1, &sem);
-          m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
-          plbuf.fenceSemaphore = sem;
-          plbuf.fenceTextures[0] = glTex;
-          plbuf.nFenceTextures = 1;
-        }
-      }
-    }
-#endif
-
-    plbuf.loaded = true;
-    buf.loaded = true;
-    return true;
-  }
-
-  // --- Software path: CPU→GPU upload via pl_upload_plane ---
   uint8_t* src[3]{};
   int srcStrides[3]{};
   buf.videoBuffer->GetPlanes(src);
@@ -1071,23 +1115,36 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
   if (plbuf.num_planes <= 0)
   {
     CLog::Log(LOGERROR,
-              "CRendererPLBase::UploadTexture - unsupported pixel format {} (buf reports {})",
+              "CRendererPLBase::UploadSoftware - unsupported pixel format {} (buf reports {})",
               static_cast<int>(fmt), static_cast<int>(buf.videoBuffer->GetFormat()));
     return false;
   }
 
   pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
 
+  // Use the AVPixFmtDescriptor (m_format is AVPixelFormat, set from videoBuffer->GetFormat())
+  // to derive the correct per-plane chroma shifts.  This handles 4:2:0, 4:2:2, and 4:4:4
+  // without hardcoding.  Fall back to shift=1 (4:2:0) if the descriptor is unavailable.
+  //
+  // NOTE: Do NOT use AV_CEIL_RSHIFT(a, b) with a runtime b.  When b is not a compile-time
+  // constant, the macro takes the path -(-(a) >> b) which is implementation-defined for
+  // signed integers and can produce wrong results.  Use the explicit ceiling formula instead.
+  const AVPixFmtDescriptor* fmtDesc = av_pix_fmt_desc_get(fmt);
+  const int chromaShiftW = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_w) : 1;
+  const int chromaShiftH = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_h) : 1;
+
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
     pdata[n].pixels = src[n];
     pdata[n].row_stride = srcStrides[n];
-    pdata[n].width = (n > 0) ? this->m_sourceWidth >> 1 : this->m_sourceWidth;
-    pdata[n].height = (n > 0) ? this->m_sourceHeight >> 1 : this->m_sourceHeight;
+    pdata[n].width = (n > 0) ? (this->m_sourceWidth + (1 << chromaShiftW) - 1) >> chromaShiftW
+                              : this->m_sourceWidth;
+    pdata[n].height = (n > 0) ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
+                               : this->m_sourceHeight;
 
     if (!pl_upload_plane(gpu, &plbuf.planes[n], &plbuf.tex[n], &pdata[n]))
     {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - pl_upload_plane failed for plane {}",
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - pl_upload_plane failed for plane {}",
                 n);
       return false;
     }
@@ -1104,7 +1161,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
   plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
   plbuf.colorRepr.bits = bits;
 
-  applyHdrMetadata(plbuf, buf);
+  ApplyHdrMetadata(plbuf, buf);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1136,22 +1193,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   frameIn.repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 
-  switch (this->m_renderOrientation)
-  {
-    case 90:
-      frameIn.rotation = PL_ROTATION_270;
-      break;
-    case 180:
-      frameIn.rotation = PL_ROTATION_180;
-      break;
-    case 270:
-      frameIn.rotation = PL_ROTATION_90;
-      break;
-    default:
-      frameIn.rotation = PL_ROTATION_0;
-      break;
-  }
-
+  frameIn.rotation = RotationFromOrientation(this->m_renderOrientation);
   frameIn.field = PL_FIELD_NONE;
 
   CRect src, dst, view;
