@@ -239,7 +239,7 @@ CRendererPLBase<TBase>::~CRendererPLBase()
   }
   if (m_cachedFboTex)
   {
-    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
   pl_options_free(&m_plOpts);
@@ -296,7 +296,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
   if (!m_plQueue)
   {
-    m_plQueue = pl_queue_create(PL::PLInstance::Get()->GetGpu());
+    m_plQueue = pl_queue_create(PL::PLInstance::Get()->m_plGpu);
     if (!m_plQueue)
       CLog::Log(LOGERROR, "CRendererPLBase::Configure - pl_queue_create failed");
   }
@@ -306,7 +306,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   // and Kodi's VAO may have been recreated since the last Configure call.
   if (m_cachedFboTex)
   {
-    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
   m_cachedFboId = UINT_MAX;
@@ -369,7 +369,7 @@ bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
   // RenderHook re-wraps with the current FBO on the next frame.
   if (m_cachedFboTex)
   {
-    pl_tex_destroy(PL::PLInstance::Get()->GetGpu(), &m_cachedFboTex);
+    pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
   m_cachedFboId = UINT_MAX;
@@ -570,7 +570,7 @@ void CRendererPLBase<TBase>::UpdateVideoFilter()
   applyStr("gamut_expansion", adv.m_libplaceboGamutExpansion);
 
   // Per-video tone mapping override (Kodi setting takes precedence over global)
-  static const char* const kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
+  static constexpr const char* kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
   if (this->m_videoSettings.m_ToneMapMethod > 0 &&
       this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
     pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
@@ -652,9 +652,57 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     return false;
 
   PLBuffer& plbuf = m_plBuffers[index];
-  if (plbuf.loaded)
+  if (plbuf.loaded) [[likely]]
     return true;
   ReleasePLBuffer(index);
+
+  // Shared HDR/DoVi metadata applicator — identical across VAAPI/DRMPRIME/SW paths.
+  auto applyHdrMetadata = [](PLBuffer& pb, const auto& b)
+  {
+    if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
+        b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+    {
+      pl_hdr_metadata& hdr = pb.colorSpace.hdr;
+      hdr = {};
+      if (b.hasDisplayMetadata)
+      {
+        const auto& m = b.displayMetadata;
+        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
+        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
+        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
+        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
+        hdr.prim.white.x = av_q2d(m.white_point[0]);
+        hdr.prim.white.y = av_q2d(m.white_point[1]);
+        if (m.has_luminance)
+        {
+          hdr.max_luma = av_q2d(m.max_luminance);
+          hdr.min_luma = av_q2d(m.min_luminance);
+        }
+      }
+      if (b.hasLightMetadata)
+      {
+        hdr.max_cll = b.lightMetadata.MaxCLL;
+        hdr.max_fall = b.lightMetadata.MaxFALL;
+      }
+    }
+    if (!pl_hdr_metadata_equal(&b.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+        b.plColorRepr.dovi != nullptr)
+    {
+      if (b.plColorRepr.dovi != nullptr)
+      {
+        pb.colorSpace = b.plColorSpace;
+        pb.colorRepr = b.plColorRepr;
+        pb.doviMetadata = b.plDoviMetadata;
+        pb.colorRepr.dovi = &pb.doviMetadata;
+      }
+      else
+      {
+        pl_hdr_metadata_merge(&pb.colorSpace.hdr, &b.plColorSpace.hdr);
+      }
+    }
+  };
 
 #if defined(HAVE_LIBVA)
   // --- VAAPI path: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap ---
@@ -759,9 +807,12 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     }
 #endif
 
-    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    const auto plInst = PL::PLInstance::Get();
+    pl_gpu gpu = plInst->GetGpu();
+    const GLenum vaapiTexTarget = GetVaapiTexTarget();
     bool success = true;
     const uint32_t numLayers = std::min(desc.num_layers, 3u);
+    glGenTextures(static_cast<GLsizei>(numLayers), plbuf.vaapiGLTex);
 
     for (uint32_t i = 0; i < numLayers && success; ++i)
     {
@@ -809,13 +860,12 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
       }
       plbuf.vaapiEGLImage[i] = eglImage;
 
-      glGenTextures(1, &plbuf.vaapiGLTex[i]);
-      glBindTexture(GL_TEXTURE_2D, plbuf.vaapiGLTex[i]);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      m_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, eglImage);
+      glBindTexture(vaapiTexTarget, plbuf.vaapiGLTex[i]);
+      glTexParameteri(vaapiTexTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(vaapiTexTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
       // No glBindTexture(0) unbind needed: pl_opengl_wrap (called below) manages
       // the texture binding itself, and leaving a texture bound is harmless here.
 
@@ -847,7 +897,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
 
       pl_opengl_wrap_params wp{};
       wp.texture = plbuf.vaapiGLTex[i];
-      wp.target = GetVaapiTexTarget(); // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
+      wp.target = vaapiTexTarget; // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
       wp.iformat = static_cast<int>(glIformat);
       wp.width = planeW;
       wp.height = planeH;
@@ -909,50 +959,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
         break;
     }
 
-    if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-        buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
-    {
-      pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
-      hdr = {};
-      if (buf.hasDisplayMetadata)
-      {
-        const auto& m = buf.displayMetadata;
-        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
-        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
-        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
-        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
-        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
-        hdr.prim.white.x = av_q2d(m.white_point[0]);
-        hdr.prim.white.y = av_q2d(m.white_point[1]);
-        if (m.has_luminance)
-        {
-          hdr.max_luma = av_q2d(m.max_luminance);
-          hdr.min_luma = av_q2d(m.min_luminance);
-        }
-      }
-      if (buf.hasLightMetadata)
-      {
-        hdr.max_cll = buf.lightMetadata.MaxCLL;
-        hdr.max_fall = buf.lightMetadata.MaxFALL;
-      }
-    }
-
-    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
-        buf.plColorRepr.dovi != nullptr)
-    {
-      if (buf.plColorRepr.dovi != nullptr)
-      {
-        plbuf.colorSpace = buf.plColorSpace;
-        plbuf.colorRepr = buf.plColorRepr;
-        plbuf.doviMetadata = buf.plDoviMetadata;
-        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
-      }
-      else
-      {
-        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
-      }
-    }
+    applyHdrMetadata(plbuf, buf);
 
     plbuf.iFlags = buf.iFlags;
     plbuf.loaded = true;
@@ -975,7 +982,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
       return false;
     }
 
-    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
     GLuint glTex = m_drmTextures[index].GetTexture();
     CSizeInt sz = m_drmTextures[index].GetTextureSize();
 
@@ -1010,53 +1017,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
     plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
 
-    if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-        buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
-    {
-      pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
-      hdr = {};
-      if (buf.hasDisplayMetadata)
-      {
-        const auto& m = buf.displayMetadata;
-        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
-        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
-        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
-        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
-        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
-        hdr.prim.white.x = av_q2d(m.white_point[0]);
-        hdr.prim.white.y = av_q2d(m.white_point[1]);
-        if (m.has_luminance)
-        {
-          hdr.max_luma = av_q2d(m.max_luminance);
-          hdr.min_luma = av_q2d(m.min_luminance);
-        }
-      }
-      if (buf.hasLightMetadata)
-      {
-        hdr.max_cll = buf.lightMetadata.MaxCLL;
-        hdr.max_fall = buf.lightMetadata.MaxFALL;
-      }
-    }
-
-    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
-        buf.plColorRepr.dovi != nullptr)
-    {
-      if (buf.plColorRepr.dovi != nullptr)
-      {
-        // Dolby Vision: fills transfer, primaries, hdr, AND colorRepr
-        plbuf.colorSpace = buf.plColorSpace;
-        plbuf.colorRepr = buf.plColorRepr;
-        plbuf.doviMetadata = buf.plDoviMetadata;
-        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
-      }
-      else
-      {
-        // HDR10 / HDR10+: only merge hdr metadata. buf.plColorRepr is zeroed for
-        // non-DoVi frames and must NOT overwrite the sys/levels we set above.
-        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
-      }
-    }
+    applyHdrMetadata(plbuf, buf);
 
     plbuf.iFlags = buf.iFlags;
 
@@ -1115,7 +1076,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
     return false;
   }
 
-  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
 
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
@@ -1143,50 +1104,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
   plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
   plbuf.colorRepr.bits = bits;
 
-  if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-      buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
-  {
-    pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
-    hdr = {};
-    if (buf.hasDisplayMetadata)
-    {
-      const auto& m = buf.displayMetadata;
-      hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
-      hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
-      hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
-      hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-      hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
-      hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
-      hdr.prim.white.x = av_q2d(m.white_point[0]);
-      hdr.prim.white.y = av_q2d(m.white_point[1]);
-      if (m.has_luminance)
-      {
-        hdr.max_luma = av_q2d(m.max_luminance);
-        hdr.min_luma = av_q2d(m.min_luminance);
-      }
-    }
-    if (buf.hasLightMetadata)
-    {
-      hdr.max_cll = buf.lightMetadata.MaxCLL;
-      hdr.max_fall = buf.lightMetadata.MaxFALL;
-    }
-  }
-
-  if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
-      buf.plColorRepr.dovi != nullptr)
-  {
-    if (buf.plColorRepr.dovi != nullptr)
-    {
-      plbuf.colorSpace = buf.plColorSpace;
-      plbuf.colorRepr = buf.plColorRepr;
-      plbuf.doviMetadata = buf.plDoviMetadata;
-      plbuf.colorRepr.dovi = &plbuf.doviMetadata;
-    }
-    else
-    {
-      pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
-    }
-  }
+  applyHdrMetadata(plbuf, buf);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1202,11 +1120,12 @@ template<typename TBase>
 bool CRendererPLBase<TBase>::RenderHook(int idx)
 {
   PLBuffer& plbuf = m_plBuffers[idx];
-  if (!plbuf.loaded)
+  if (!plbuf.loaded) [[unlikely]]
     return false;
 
-  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
-  pl_renderer renderer = PL::PLInstance::Get()->GetRenderer();
+  const auto plInst = PL::PLInstance::Get();
+  pl_gpu gpu = plInst->GetGpu();
+  pl_renderer renderer = plInst->GetRenderer();
 
   // Build input frame (used as fallback if the queue path doesn't fire)
   pl_frame frameIn{};
@@ -1382,13 +1301,13 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
 
     pl_frame_mix mix{};
     const auto status = pl_queue_update(m_plQueue, &mix, &qparams);
-    if (status == PL_QUEUE_OK || status == PL_QUEUE_MORE)
+    if (status == PL_QUEUE_OK || status == PL_QUEUE_MORE) [[likely]]
     {
       if (!pl_render_image_mix(renderer, &mix, &frameOut, &params))
         CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_render_image_mix failed");
       rendered = true;
     }
-    else if (status == PL_QUEUE_ERR)
+    else if (status == PL_QUEUE_ERR) [[unlikely]]
     {
       CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_queue_update error");
     }
@@ -1450,7 +1369,7 @@ void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
       plbuf.nFenceTextures = 0;
     }
 
-    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
     for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
     {
       if (plbuf.tex[n])
@@ -1498,7 +1417,7 @@ void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
 
   m_drmTextures[index].Unmap();
 
-  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
     if (plbuf.tex[n])
