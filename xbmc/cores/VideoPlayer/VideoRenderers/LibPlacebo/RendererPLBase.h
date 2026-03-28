@@ -25,7 +25,6 @@
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
-#include "system_egl.h"
 #include "system_gl.h"
 
 #if defined(HAVE_LIBVA)
@@ -80,8 +79,8 @@ public:
 
   bool Configure(const VideoPicture& picture, float fps, unsigned int orientation) override;
   bool ConfigChanged(const VideoPicture& picture) override;
-  bool Supports(ERENDERFEATURE feature) const override;
-  bool Supports(ESCALINGMETHOD method) const override;
+  [[nodiscard]] bool Supports(ERENDERFEATURE feature) const override;
+  [[nodiscard]] bool Supports(ESCALINGMETHOD method) const override;
   void AddVideoPicture(const VideoPicture& picture, int index) override;
   bool Flush(bool saveBuffers) override;
 
@@ -95,8 +94,8 @@ protected:
   EShaderFormat GetShaderFormat() override;
 
   // Platform-specific hooks implemented by concrete subclasses.
-  virtual GLenum GetVaapiTexTarget() const = 0;
-  virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
+  [[nodiscard]] virtual GLenum GetVaapiTexTarget() const = 0;
+  [[nodiscard]] virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
 
 private:
   struct PLBuffer
@@ -789,7 +788,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   }
 
   VADRMPRIMESurfaceDescriptor desc{};
-  VAStatus vaStatus =
+  const VAStatus vaStatus =
       vaExportSurfaceHandle(vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                             VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
   if (vaStatus != VA_STATUS_SUCCESS)
@@ -839,7 +838,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
 #endif
 
   const auto plInst = PL::PLInstance::Get();
-  pl_gpu gpu = plInst->GetGpu();
+  const pl_gpu gpu = plInst->GetGpu();
   const GLenum vaapiTexTarget = GetVaapiTexTarget();
   bool success = true;
   const uint32_t numLayers = std::min(desc.num_layers, 3u);
@@ -879,7 +878,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
       *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
       *a++ = static_cast<EGLint>(object.drm_format_modifier >> 32);
     }
-    *a++ = EGL_NONE;
+    *a = EGL_NONE;
 
     EGLImageKHR eglImage =
         m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
@@ -1207,7 +1206,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
 
   GLint currentFbo = 0;
   glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFbo);
-  const unsigned int fboId = static_cast<unsigned int>(currentFbo);
+  const auto fboId = static_cast<unsigned int>(currentFbo);
 
   // Re-wrap the framebuffer only when it changes.  pl_opengl_wrap/pl_tex_destroy
   // on every frame is expensive: some drivers flush pending GPU work at this point
