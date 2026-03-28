@@ -286,3 +286,5 @@ CMakeDoxyfile.in
 CLAUDE.md
 
 .claude/
+
+libplacebo
