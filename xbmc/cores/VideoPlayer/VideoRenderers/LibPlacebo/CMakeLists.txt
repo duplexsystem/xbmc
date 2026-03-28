@@ -9,6 +9,7 @@ set(HEADERS
             PlHelper.h)
 
 if(NOT (WIN32 OR WINDOWS_STORE))
+  list(APPEND HEADERS RendererPLBase.h)
   list(APPEND SOURCES RendererPLGL.cpp)
   list(APPEND HEADERS RendererPLGL.h)
   if(TARGET ${APP_NAME_LC}::OpenGLES)

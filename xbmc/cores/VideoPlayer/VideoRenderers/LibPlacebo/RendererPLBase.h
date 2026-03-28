@@ -1,0 +1,1193 @@
+/*
+ *  Copyright (C) 2025 Team Kodi
+ *  This file is part of Kodi - https://kodi.tv
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ *  See LICENSES/README.md for more information.
+ */
+
+#pragma once
+
+// NOTE: This header must be included AFTER the concrete base renderer header
+// (LinuxRendererGL.h or LinuxRendererGLES.h) so that renderer-specific types
+// such as CPictureBuffer, RenderMethod, and EShaderFormat are already declared.
+
+#include "PlHelper.h"
+#include "ServiceBroker.h"
+#include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
+#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
+#include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
+#include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
+#include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
+#include "utils/log.h"
+#include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
+
+#include "system_egl.h"
+#include "system_gl.h"
+
+#if defined(HAVE_LIBVA)
+#include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
+
+#include <drm_fourcc.h>
+#include <va/va_drmcommon.h>
+#endif
+
+extern "C"
+{
+#include <libavutil/pixfmt.h>
+}
+
+#include <libplacebo/utils/libav.h>
+#include <unistd.h>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+
+#include <array>
+
+/**
+ * @brief CRTP mixin providing the shared libplacebo renderer implementation.
+ *
+ * TBase is either CLinuxRendererGL or CLinuxRendererGLES.
+ * Concrete classes must:
+ *   - Provide static Create()/Register() factory methods
+ *   - Implement GetVaapiTexTarget() — returns GL_TEXTURE_2D (desktop) or
+ *     GL_TEXTURE_EXTERNAL_OES (GLES)
+ *   - Implement GetDRMPRIMEEGLDisplay() — returns the platform EGLDisplay to
+ *     pass to CDRMPRIMETexture::Init()
+ */
+template<typename TBase>
+class CRendererPLBase : public TBase
+{
+public:
+  CRendererPLBase();
+  ~CRendererPLBase() override;
+
+  bool Configure(const VideoPicture& picture, float fps, unsigned int orientation) override;
+  bool ConfigChanged(const VideoPicture& picture) override;
+  bool Supports(ERENDERFEATURE feature) const override;
+  bool Supports(ESCALINGMETHOD method) const override;
+  void AddVideoPicture(const VideoPicture& picture, int index) override;
+  bool Flush(bool saveBuffers) override;
+
+protected:
+  bool CreateTexture(int index) override;
+  void DeleteTexture(int index) override;
+  bool UploadTexture(int index) override;
+  bool LoadShadersHook() override;
+  bool RenderHook(int idx) override;
+  void UpdateVideoFilter() override;
+  EShaderFormat GetShaderFormat() override;
+
+  // Platform-specific hooks implemented by concrete subclasses.
+  virtual GLenum GetVaapiTexTarget() const = 0;
+  virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
+
+private:
+  struct PLBuffer
+  {
+    pl_plane planes[3]{};
+    pl_tex tex[3]{};
+    int num_planes{0};
+    pl_color_space colorSpace{};
+    pl_color_repr colorRepr{};
+    pl_dovi_metadata doviMetadata{}; ///< Owned copy; colorRepr.dovi points here when valid
+    unsigned int iFlags{0}; ///< DVP_FLAG_* interlace flags
+    bool loaded{false};
+#if defined(HAVE_LIBVA)
+    GLuint vaapiGLTex[3]{};
+    EGLImageKHR vaapiEGLImage[3]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
+    int vaapiExportedFd[4]{-1, -1, -1, -1};
+    int vaapiNumFds{0};
+#endif
+  };
+
+  std::array<PLBuffer, NUM_BUFFERS> m_plBuffers{};
+  std::array<CDRMPRIMETexture, NUM_BUFFERS> m_drmTextures{};
+  bool m_isDRMPRIME{false};
+
+#if defined(HAVE_LIBVA)
+  bool m_isVAAPI{false};
+  EGLDisplay m_eglDisplay{EGL_NO_DISPLAY};
+  PFNEGLCREATEIMAGEKHRPROC m_eglCreateImageKHR{nullptr};
+  PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR{nullptr};
+  PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
+  bool m_hasEGLModifiers{false};
+#endif
+
+  AVPixelFormat m_format{AV_PIX_FMT_NONE};
+  pl_color_space m_colorSpace{};
+  pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
+  pl_options m_plOpts{nullptr}; ///< Owns all libplacebo render parameters
+
+  struct QueuedFrameState
+  {
+    int bufferIndex;
+    CRendererPLBase* renderer;
+  };
+
+  pl_queue m_plQueue{nullptr};
+  double m_queuePtsOffset{0.0};
+  bool m_queuePtsOffsetSet{false};
+
+  static bool MapCallback(pl_gpu gpu,
+                          pl_tex* tex,
+                          const struct pl_source_frame* src,
+                          struct pl_frame* out);
+  static void UnmapCallback(pl_gpu gpu, struct pl_frame* frame, const struct pl_source_frame* src);
+  static void DiscardCallback(const struct pl_source_frame* src);
+
+  void ReleasePLBuffer(int index);
+};
+
+// =============================================================================
+// Template implementations
+// =============================================================================
+
+template<typename TBase>
+CRendererPLBase<TBase>::CRendererPLBase()
+{
+  m_plOpts = pl_options_alloc(PL::PLInstance::Get()->m_plLog);
+}
+
+template<typename TBase>
+CRendererPLBase<TBase>::~CRendererPLBase()
+{
+  for (int i = 0; i < NUM_BUFFERS; ++i)
+    ReleasePLBuffer(i);
+  if (m_plQueue)
+  {
+    pl_queue_destroy(&m_plQueue);
+    m_plQueue = nullptr;
+  }
+  pl_options_free(&m_plOpts);
+  PL::PLInstance::Get()->Reset();
+}
+
+// ---------------------------------------------------------------------------
+// Configure / Flush / AddVideoPicture
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture, float fps,
+                                       unsigned int orientation)
+{
+  if (!TBase::Configure(picture, fps, orientation))
+    return false;
+
+  m_format = picture.videoBuffer->GetFormat();
+
+  m_colorSpace = pl_color_space{};
+  m_colorSpace.primaries = pl_primaries_from_av(picture.color_primaries);
+  m_colorSpace.transfer = pl_transfer_from_av(picture.color_transfer);
+  m_chromaLocation = pl_chroma_from_av(picture.chroma_position);
+
+#if defined(HAVE_LIBVA)
+  m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
+  if (m_isVAAPI)
+  {
+    m_eglDisplay = eglGetCurrentDisplay();
+    m_eglCreateImageKHR =
+        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+    m_eglDestroyImageKHR =
+        reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+    m_glEGLImageTargetTexture2DOES = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
+        eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+    m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
+  }
+#endif
+
+  m_isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(picture.videoBuffer) != nullptr);
+  if (m_isDRMPRIME)
+  {
+    EGLDisplay eglDpy = GetDRMPRIMEEGLDisplay();
+    for (auto& dt : m_drmTextures)
+      dt.Init(eglDpy);
+  }
+
+  if (!m_plQueue)
+  {
+    m_plQueue = pl_queue_create(PL::PLInstance::Get()->GetGpu());
+    if (!m_plQueue)
+      CLog::Log(LOGERROR, "CRendererPLBase::Configure - pl_queue_create failed");
+  }
+  m_queuePtsOffsetSet = false;
+
+  return true;
+}
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::ConfigChanged(const VideoPicture& picture)
+{
+  return picture.videoBuffer->GetFormat() != m_format;
+}
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
+{
+  if (m_plQueue)
+  {
+    pl_queue_reset(m_plQueue);
+    m_queuePtsOffsetSet = false;
+  }
+  return TBase::Flush(saveBuffers);
+}
+
+template<typename TBase>
+void CRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, int index)
+{
+  TBase::AddVideoPicture(picture, index);
+  m_plBuffers[index].loaded = false;
+
+  if (!m_plQueue || this->m_fps <= 0.0f)
+    return;
+
+  if (!m_queuePtsOffsetSet)
+  {
+    m_queuePtsOffset = picture.pts;
+    m_queuePtsOffsetSet = true;
+  }
+
+  auto* qf = new QueuedFrameState{index, this};
+
+  pl_source_frame src{};
+  src.pts = picture.pts - m_queuePtsOffset;
+  src.duration = 1.0 / static_cast<double>(this->m_fps);
+  if (picture.iFlags & DVP_FLAG_INTERLACED)
+    src.first_field = (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
+  src.frame_data = qf;
+  src.map = &CRendererPLBase<TBase>::MapCallback;
+  src.unmap = &CRendererPLBase<TBase>::UnmapCallback;
+  src.discard = &CRendererPLBase<TBase>::DiscardCallback;
+
+  pl_queue_push(m_plQueue, &src);
+}
+
+// ---------------------------------------------------------------------------
+// pl_queue callbacks
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
+                                         pl_tex* /*tex*/,
+                                         const struct pl_source_frame* src,
+                                         struct pl_frame* out)
+{
+  // libplacebo does not zero the pl_frame before calling map(); initialize it
+  // so that crop={0,0,0,0} (full texture), field=PL_FIELD_NONE, etc. are clean.
+  *out = {};
+
+  auto* qf = static_cast<QueuedFrameState*>(src->frame_data);
+  CRendererPLBase<TBase>* r = qf->renderer;
+  const int idx = qf->bufferIndex;
+
+  if (!r->UploadTexture(idx))
+    return false;
+
+  const PLBuffer& plbuf = r->m_plBuffers[idx];
+  if (!plbuf.loaded)
+    return false;
+
+  out->num_planes = plbuf.num_planes;
+  for (int n = 0; n < plbuf.num_planes; ++n)
+    out->planes[n] = plbuf.planes[n];
+  out->color = plbuf.colorSpace;
+  out->repr = plbuf.colorRepr;
+  pl_frame_set_chroma_location(out, r->m_chromaLocation);
+
+  switch (r->m_renderOrientation)
+  {
+    case 90:
+      out->rotation = PL_ROTATION_270;
+      break;
+    case 180:
+      out->rotation = PL_ROTATION_180;
+      break;
+    case 270:
+      out->rotation = PL_ROTATION_90;
+      break;
+    default:
+      out->rotation = PL_ROTATION_0;
+      break;
+  }
+
+  // pl_queue sets out->field after map() returns based on first_field splitting.
+  out->field = PL_FIELD_NONE;
+
+  // Leave planes[n].flipped as set by UploadTexture (true for EGLImage DMA-buf
+  // imports where DMA-buf row 0 = top of video but GL texcoord t=0 = bottom).
+  // libplacebo's pass_align_planes inverts the sampling rect for flipped planes.
+
+  return true;
+}
+
+template<typename TBase>
+void CRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
+                                           struct pl_frame* /*frame*/,
+                                           const struct pl_source_frame* src)
+{
+  // Textures remain in m_plBuffers and are freed by DeleteTexture / ReleasePLBuffer.
+  delete static_cast<QueuedFrameState*>(src->frame_data);
+}
+
+template<typename TBase>
+void CRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
+{
+  delete static_cast<QueuedFrameState*>(src->frame_data);
+}
+
+// ---------------------------------------------------------------------------
+// Feature / scaling support
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
+{
+  switch (feature)
+  {
+    case RENDERFEATURE_ZOOM:
+    case RENDERFEATURE_VERTICAL_SHIFT:
+    case RENDERFEATURE_PIXEL_RATIO:
+    case RENDERFEATURE_STRETCH:
+    case RENDERFEATURE_ROTATION:
+    case RENDERFEATURE_TONEMAP:
+      return true;
+    default:
+      return false;
+  }
+}
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
+{
+  switch (method)
+  {
+    case VS_SCALINGMETHOD_AUTO:
+    case VS_SCALINGMETHOD_LINEAR:
+    case VS_SCALINGMETHOD_LANCZOS3:
+    case VS_SCALINGMETHOD_LANCZOS3_FAST:
+    case VS_SCALINGMETHOD_SPLINE36:
+    case VS_SCALINGMETHOD_SPLINE36_FAST:
+    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
+    case VS_SCALINGMETHOD_CUBIC_CATMULL:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UpdateVideoFilter — apply advancedsettings.xml to libplacebo render params
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::UpdateVideoFilter()
+{
+  TBase::UpdateVideoFilter();
+  pl_options_reset(m_plOpts, nullptr);
+
+  const auto& adv = *CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  auto applyStr = [&](const char* key, const std::string& val)
+  {
+    if (!val.empty())
+      pl_options_set_str(m_plOpts, key, val.c_str());
+  };
+
+  // Scaling
+  applyStr("preset", adv.m_libplaceboPreset);
+  applyStr("upscaler", adv.m_libplaceboUpscaler);
+  applyStr("downscaler", adv.m_libplaceboDownscaler);
+  applyStr("frame_mixer", adv.m_libplaceboFrameMixer);
+  applyStr("antiringing_strength", adv.m_libplaceboAntiringing);
+  applyStr("sigmoid", adv.m_libplaceboSigmoid);
+
+  // Debanding
+  applyStr("deband", adv.m_libplaceboDeband);
+  applyStr("deband_iterations", adv.m_libplaceboDebandIterations);
+  applyStr("deband_threshold", adv.m_libplaceboDebandThreshold);
+  applyStr("deband_radius", adv.m_libplaceboDebandRadius);
+  applyStr("deband_grain", adv.m_libplaceboDebandGrain);
+
+  // Peak detection
+  applyStr("peak_detect", adv.m_libplaceboPeakDetect);
+  applyStr("smoothing_period", adv.m_libplaceboSmoothingPeriod);
+  applyStr("scene_threshold_low", adv.m_libplaceboSceneThresholdLow);
+  applyStr("scene_threshold_high", adv.m_libplaceboSceneThresholdHigh);
+  applyStr("peak_percentile", adv.m_libplaceboPeakPercentile);
+
+  // Tone and gamut mapping
+  applyStr("tone_mapping", adv.m_libplaceboToneMapping);
+  applyStr("tone_mapping_param", adv.m_libplaceboToneMappingParam);
+  applyStr("gamut_mapping", adv.m_libplaceboGamutMapping);
+  applyStr("gamut_expansion", adv.m_libplaceboGamutExpansion);
+
+  // Per-video tone mapping override (Kodi setting takes precedence over global)
+  static const char* const kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
+  if (this->m_videoSettings.m_ToneMapMethod > 0 &&
+      this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
+    pl_options_set_str(m_plOpts, "tone_mapping",
+                       kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
+
+  // Dithering
+  applyStr("dither", adv.m_libplaceboDither);
+  applyStr("dither_method", adv.m_libplaceboDitherMethod);
+  applyStr("dither_lut_size", adv.m_libplaceboDitherLutSize);
+
+  // Deinterlacing
+  applyStr("deinterlace", adv.m_libplaceboDeinterlace);
+  applyStr("deinterlace_algo", adv.m_libplaceboDeinterlaceAlgo);
+
+  // Misc
+  applyStr("skip_anti_aliasing", adv.m_libplaceboSkipAntiAliasing);
+  applyStr("disable_linear", adv.m_libplaceboDisableLinear);
+  applyStr("disable_builtin_scalers", adv.m_libplaceboDisableBuiltinScalers);
+  applyStr("force_dither", adv.m_libplaceboForceDither);
+  applyStr("disable_fbos", adv.m_libplaceboDisableFbos);
+}
+
+template<typename TBase>
+EShaderFormat CRendererPLBase<TBase>::GetShaderFormat()
+{
+  return SHADER_NONE;
+}
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::LoadShadersHook()
+{
+  // Prevent TBase from loading its own YUV shaders; we render via RenderHook.
+  // RENDER_GLSL is a file-scope enum value defined in both LinuxRendererGL.h and
+  // LinuxRendererGLES.h, so it is visible here as a non-dependent name.
+  this->m_renderMethod = RENDER_GLSL;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Texture lifecycle
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::CreateTexture(int index)
+{
+  auto& buf = this->m_buffers[index];
+  auto& im = buf.image;
+  memset(&im, 0, sizeof(im));
+  im.height = this->m_sourceHeight;
+  im.width = this->m_sourceWidth;
+  im.cshift_x = 1;
+  im.cshift_y = 1;
+
+  // Generate a real dummy texture so ValidateRenderer passes safely.
+  GLuint dummyTex = 0;
+  glGenTextures(1, &dummyTex);
+  buf.fields[0][0].id = dummyTex; // 0 == FIELD_FULL
+  return true;
+}
+
+template<typename TBase>
+void CRendererPLBase<TBase>::DeleteTexture(int index)
+{
+  ReleasePLBuffer(index);
+  GLuint dummyTex = this->m_buffers[index].fields[0][0].id; // 0 == FIELD_FULL
+  if (dummyTex > 0)
+    glDeleteTextures(1, &dummyTex);
+  this->m_buffers[index].fields[0][0].id = 0;
+}
+
+// ---------------------------------------------------------------------------
+// UploadTexture — VAAPI / DRMPRIME / software paths
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::UploadTexture(int index)
+{
+  auto& buf = this->m_buffers[index];
+  if (!buf.videoBuffer)
+    return false;
+
+  PLBuffer& plbuf = m_plBuffers[index];
+  if (plbuf.loaded)
+    return true;
+  ReleasePLBuffer(index);
+
+#if defined(HAVE_LIBVA)
+  // --- VAAPI path: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap ---
+  if (m_isVAAPI)
+  {
+    auto* vaaPic = dynamic_cast<VAAPI::CVaapiRenderPicture*>(buf.videoBuffer);
+    if (!vaaPic)
+      return false;
+
+    if (!m_eglCreateImageKHR || !m_eglDestroyImageKHR || !m_glEGLImageTargetTexture2DOES)
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - EGL interop not available for VAAPI");
+      return false;
+    }
+
+    VASurfaceID surface = vaaPic->procPic.videoSurface;
+    if (surface == VA_INVALID_ID && vaaPic->avFrame)
+      surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(vaaPic->avFrame->data[3]));
+    if (surface == VA_INVALID_ID)
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - no valid VAAPI surface");
+      return false;
+    }
+
+    VADisplay vadsp = vaaPic->vadsp;
+    vaSyncSurface(vadsp, surface);
+
+    VADRMPRIMESurfaceDescriptor desc{};
+    VAStatus vaStatus = vaExportSurfaceHandle(
+        vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
+    if (vaStatus != VA_STATUS_SUCCESS)
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - vaExportSurfaceHandle failed: {}",
+                vaErrorStr(vaStatus));
+      return false;
+    }
+
+    plbuf.vaapiNumFds = static_cast<int>(
+        std::min(desc.num_objects, static_cast<uint32_t>(std::size(plbuf.vaapiExportedFd))));
+    for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
+      plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
+
+    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    bool success = true;
+    const uint32_t numLayers = std::min(desc.num_layers, 3u);
+
+    for (uint32_t i = 0; i < numLayers && success; ++i)
+    {
+      const auto& layer = desc.layers[i];
+      const auto& object = desc.objects[layer.object_index[0]];
+
+      const EGLint planeW =
+          (i == 0) ? static_cast<EGLint>(desc.width) : (static_cast<EGLint>(desc.width) + 1) / 2;
+      const EGLint planeH =
+          (i == 0) ? static_cast<EGLint>(desc.height) : (static_cast<EGLint>(desc.height) + 1) / 2;
+
+      EGLint attribs[17];
+      EGLint* a = attribs;
+      *a++ = EGL_LINUX_DRM_FOURCC_EXT;
+      *a++ = static_cast<EGLint>(layer.drm_format);
+      *a++ = EGL_WIDTH;
+      *a++ = planeW;
+      *a++ = EGL_HEIGHT;
+      *a++ = planeH;
+      *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
+      *a++ = object.fd;
+      *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+      *a++ = static_cast<EGLint>(layer.offset[0]);
+      *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+      *a++ = static_cast<EGLint>(layer.pitch[0]);
+      if (m_hasEGLModifiers && object.drm_format_modifier != DRM_FORMAT_MOD_INVALID)
+      {
+        *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+        *a++ = static_cast<EGLint>(object.drm_format_modifier & 0xFFFFFFFFu);
+        *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+        *a++ = static_cast<EGLint>(object.drm_format_modifier >> 32);
+      }
+      *a++ = EGL_NONE;
+
+      EGLImageKHR eglImage = m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT,
+                                                 EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+      if (!eglImage)
+      {
+        CLog::Log(LOGERROR,
+                  "CRendererPLBase::UploadTexture - eglCreateImageKHR failed for VAAPI plane {} "
+                  "(EGL error 0x{:x})",
+                  i, static_cast<unsigned>(eglGetError()));
+        success = false;
+        break;
+      }
+      plbuf.vaapiEGLImage[i] = eglImage;
+
+      glGenTextures(1, &plbuf.vaapiGLTex[i]);
+      glBindTexture(GL_TEXTURE_2D, plbuf.vaapiGLTex[i]);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      m_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, eglImage);
+      glBindTexture(GL_TEXTURE_2D, 0);
+
+      GLenum glIformat = 0;
+      switch (layer.drm_format)
+      {
+        case DRM_FORMAT_R8:
+          glIformat = GL_R8;
+          break;
+        case DRM_FORMAT_GR88:
+          glIformat = GL_RG8;
+          break;
+        case DRM_FORMAT_R16:
+          glIformat = GL_R16;
+          break;
+        case DRM_FORMAT_GR1616:
+          glIformat = GL_RG16;
+          break;
+        default:
+          CLog::Log(LOGERROR,
+                    "CRendererPLBase::UploadTexture - unsupported DRM fourcc 0x{:x} for VAAPI "
+                    "plane {}",
+                    layer.drm_format, i);
+          success = false;
+          break;
+      }
+      if (!success)
+        break;
+
+      pl_opengl_wrap_params wp{};
+      wp.texture = plbuf.vaapiGLTex[i];
+      wp.target = GetVaapiTexTarget(); // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
+      wp.iformat = static_cast<int>(glIformat);
+      wp.width = planeW;
+      wp.height = planeH;
+
+      plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
+      if (!plbuf.tex[i])
+      {
+        CLog::Log(LOGERROR,
+                  "CRendererPLBase::UploadTexture - pl_opengl_wrap failed for VAAPI plane {}", i);
+        success = false;
+      }
+    }
+
+    if (!success)
+    {
+      ReleasePLBuffer(index);
+      return false;
+    }
+
+    plbuf.num_planes = static_cast<int>(numLayers);
+
+    plbuf.planes[0] = {};
+    plbuf.planes[0].texture = plbuf.tex[0];
+    plbuf.planes[0].components = 1;
+    plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+    plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
+    plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[0].flipped = true;
+
+    if (numLayers > 1)
+    {
+      plbuf.planes[1] = {};
+      plbuf.planes[1].texture = plbuf.tex[1];
+      plbuf.planes[1].components = 2;
+      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+      plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+      plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
+      plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
+      plbuf.planes[1].flipped = true;
+    }
+
+    plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
+    if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
+      plbuf.colorRepr.sys =
+          pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+    plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+    plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+    plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+
+    switch (desc.fourcc)
+    {
+      case VA_FOURCC_P010:
+        plbuf.colorRepr.bits = {16, 10, 6};
+        break;
+      case VA_FOURCC_P016:
+        plbuf.colorRepr.bits = {16, 16, 0};
+        break;
+      default:
+        break;
+    }
+
+    if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
+        buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+    {
+      pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
+      hdr = {};
+      if (buf.hasDisplayMetadata)
+      {
+        const auto& m = buf.displayMetadata;
+        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
+        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
+        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
+        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
+        hdr.prim.white.x = av_q2d(m.white_point[0]);
+        hdr.prim.white.y = av_q2d(m.white_point[1]);
+        if (m.has_luminance)
+        {
+          hdr.max_luma = av_q2d(m.max_luminance);
+          hdr.min_luma = av_q2d(m.min_luminance);
+        }
+      }
+      if (buf.hasLightMetadata)
+      {
+        hdr.max_cll = buf.lightMetadata.MaxCLL;
+        hdr.max_fall = buf.lightMetadata.MaxFALL;
+      }
+    }
+
+    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+        buf.plColorRepr.dovi != nullptr)
+    {
+      if (buf.plColorRepr.dovi != nullptr)
+      {
+        plbuf.colorSpace = buf.plColorSpace;
+        plbuf.colorRepr = buf.plColorRepr;
+        plbuf.doviMetadata = buf.plDoviMetadata;
+        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      }
+      else
+      {
+        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+      }
+    }
+
+    plbuf.iFlags = buf.iFlags;
+    plbuf.loaded = true;
+    buf.loaded = true;
+    return true;
+  }
+#endif
+
+  // --- DRMPRIME path: DMA-buf → single combined OES texture → pl_tex ---
+  if (m_isDRMPRIME)
+  {
+    auto* drmBuf = dynamic_cast<CVideoBufferDRMPRIME*>(buf.videoBuffer);
+    if (!drmBuf)
+      return false;
+
+    m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
+    if (!m_drmTextures[index].Map(drmBuf))
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - CDRMPRIMETexture::Map failed");
+      return false;
+    }
+
+    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    GLuint glTex = m_drmTextures[index].GetTexture();
+    CSizeInt sz = m_drmTextures[index].GetTextureSize();
+
+    pl_opengl_wrap_params wp{};
+    wp.texture = glTex;
+    wp.target = GL_TEXTURE_EXTERNAL_OES;
+    wp.iformat = GL_RGBA8;
+    wp.width = sz.Width();
+    wp.height = sz.Height();
+
+    plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
+    if (!plbuf.tex[0])
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - pl_opengl_wrap failed for DRMPRIME");
+      m_drmTextures[index].Unmap();
+      return false;
+    }
+
+    plbuf.planes[0] = {};
+    plbuf.planes[0].texture = plbuf.tex[0];
+    plbuf.planes[0].components = 3;
+    plbuf.planes[0].component_mapping[0] = PL_CHANNEL_R;
+    plbuf.planes[0].component_mapping[1] = PL_CHANNEL_G;
+    plbuf.planes[0].component_mapping[2] = PL_CHANNEL_B;
+    plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.num_planes = 1;
+
+    // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
+    // yielding RGB in the source primaries/transfer. Tell libplacebo this is RGB.
+    plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
+    plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+    plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+    plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+
+    if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
+        buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+    {
+      pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
+      hdr = {};
+      if (buf.hasDisplayMetadata)
+      {
+        const auto& m = buf.displayMetadata;
+        hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+        hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
+        hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
+        hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
+        hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+        hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
+        hdr.prim.white.x = av_q2d(m.white_point[0]);
+        hdr.prim.white.y = av_q2d(m.white_point[1]);
+        if (m.has_luminance)
+        {
+          hdr.max_luma = av_q2d(m.max_luminance);
+          hdr.min_luma = av_q2d(m.min_luminance);
+        }
+      }
+      if (buf.hasLightMetadata)
+      {
+        hdr.max_cll = buf.lightMetadata.MaxCLL;
+        hdr.max_fall = buf.lightMetadata.MaxFALL;
+      }
+    }
+
+    if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+        buf.plColorRepr.dovi != nullptr)
+    {
+      if (buf.plColorRepr.dovi != nullptr)
+      {
+        // Dolby Vision: fills transfer, primaries, hdr, AND colorRepr
+        plbuf.colorSpace = buf.plColorSpace;
+        plbuf.colorRepr = buf.plColorRepr;
+        plbuf.doviMetadata = buf.plDoviMetadata;
+        plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+      }
+      else
+      {
+        // HDR10 / HDR10+: only merge hdr metadata. buf.plColorRepr is zeroed for
+        // non-DoVi frames and must NOT overwrite the sys/levels we set above.
+        pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+      }
+    }
+
+    plbuf.iFlags = buf.iFlags;
+    plbuf.loaded = true;
+    buf.loaded = true;
+    return true;
+  }
+
+  // --- Software path: CPU→GPU upload via pl_upload_plane ---
+  uint8_t* src[3]{};
+  int srcStrides[3]{};
+  buf.videoBuffer->GetPlanes(src);
+  buf.videoBuffer->GetStrides(srcStrides);
+
+  pl_bit_encoding bits{};
+  pl_plane_data pdata[4]{};
+  const AVPixelFormat fmt = m_format;
+  plbuf.num_planes = pl_plane_data_from_pixfmt(pdata, &bits, fmt);
+  if (plbuf.num_planes <= 0)
+  {
+    CLog::Log(LOGERROR,
+              "CRendererPLBase::UploadTexture - unsupported pixel format {} (buf reports {})",
+              static_cast<int>(fmt), static_cast<int>(buf.videoBuffer->GetFormat()));
+    return false;
+  }
+
+  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+
+  for (int n = 0; n < plbuf.num_planes; ++n)
+  {
+    pdata[n].pixels = src[n];
+    pdata[n].row_stride = srcStrides[n];
+    pdata[n].width = (n > 0) ? this->m_sourceWidth >> 1 : this->m_sourceWidth;
+    pdata[n].height = (n > 0) ? this->m_sourceHeight >> 1 : this->m_sourceHeight;
+
+    if (!pl_upload_plane(gpu, &plbuf.planes[n], &plbuf.tex[n], &pdata[n]))
+    {
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadTexture - pl_upload_plane failed for plane {}",
+                n);
+      return false;
+    }
+
+    // OpenGL's coordinate system is bottom-up; top-down memory uploads are inverted.
+    plbuf.planes[n].flipped = true;
+  }
+
+  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
+  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
+    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+  plbuf.colorRepr.bits = bits;
+
+  if (buf.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
+      buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+  {
+    pl_hdr_metadata& hdr = plbuf.colorSpace.hdr;
+    hdr = {};
+    if (buf.hasDisplayMetadata)
+    {
+      const auto& m = buf.displayMetadata;
+      hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
+      hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
+      hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
+      hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
+      hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
+      hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
+      hdr.prim.white.x = av_q2d(m.white_point[0]);
+      hdr.prim.white.y = av_q2d(m.white_point[1]);
+      if (m.has_luminance)
+      {
+        hdr.max_luma = av_q2d(m.max_luminance);
+        hdr.min_luma = av_q2d(m.min_luminance);
+      }
+    }
+    if (buf.hasLightMetadata)
+    {
+      hdr.max_cll = buf.lightMetadata.MaxCLL;
+      hdr.max_fall = buf.lightMetadata.MaxFALL;
+    }
+  }
+
+  if (!pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
+      buf.plColorRepr.dovi != nullptr)
+  {
+    if (buf.plColorRepr.dovi != nullptr)
+    {
+      plbuf.colorSpace = buf.plColorSpace;
+      plbuf.colorRepr = buf.plColorRepr;
+      plbuf.doviMetadata = buf.plDoviMetadata;
+      plbuf.colorRepr.dovi = &plbuf.doviMetadata;
+    }
+    else
+    {
+      pl_hdr_metadata_merge(&plbuf.colorSpace.hdr, &buf.plColorSpace.hdr);
+    }
+  }
+
+  plbuf.iFlags = buf.iFlags;
+  plbuf.loaded = true;
+  buf.loaded = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Main render hook
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::RenderHook(int idx)
+{
+  PLBuffer& plbuf = m_plBuffers[idx];
+  if (!plbuf.loaded)
+    return false;
+
+  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+  pl_renderer renderer = PL::PLInstance::Get()->GetRenderer();
+
+  // Build input frame (used as fallback if the queue path doesn't fire)
+  pl_frame frameIn{};
+  frameIn.num_planes = plbuf.num_planes;
+  for (int n = 0; n < plbuf.num_planes; ++n)
+    frameIn.planes[n] = plbuf.planes[n];
+  frameIn.color = plbuf.colorSpace;
+  frameIn.repr = plbuf.colorRepr;
+  pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
+
+  switch (this->m_renderOrientation)
+  {
+    case 90:
+      frameIn.rotation = PL_ROTATION_270;
+      break;
+    case 180:
+      frameIn.rotation = PL_ROTATION_180;
+      break;
+    case 270:
+      frameIn.rotation = PL_ROTATION_90;
+      break;
+    default:
+      frameIn.rotation = PL_ROTATION_0;
+      break;
+  }
+
+  frameIn.field = PL_FIELD_NONE;
+
+  CRect src, dst, view;
+  this->GetVideoRect(src, dst, view);
+  int viewW = static_cast<int>(view.Width());
+  int viewH = static_cast<int>(view.Height());
+  if (viewW <= 0 || viewH <= 0)
+    return false;
+
+  GLint currentFbo = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFbo);
+
+  pl_opengl_wrap_params wrapParams{};
+  wrapParams.framebuffer = static_cast<unsigned int>(currentFbo);
+  wrapParams.width = viewW;
+  wrapParams.height = viewH;
+  wrapParams.iformat = GL_RGBA8;
+
+  pl_tex outTex = pl_opengl_wrap(gpu, &wrapParams);
+  if (!outTex)
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::RenderHook - failed to wrap GL framebuffer");
+    return false;
+  }
+
+  pl_frame frameOut{};
+  frameOut.num_planes = 1;
+  frameOut.planes[0].texture = outTex;
+  frameOut.planes[0].components = 3;
+  frameOut.planes[0].component_mapping[0] = PL_CHANNEL_R;
+  frameOut.planes[0].component_mapping[1] = PL_CHANNEL_G;
+  frameOut.planes[0].component_mapping[2] = PL_CHANNEL_B;
+  frameOut.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  frameOut.crop = {dst.x1, dst.y1, dst.x2, dst.y2};
+
+  if (this->m_passthroughHDR)
+  {
+    const auto& buf = this->m_buffers[idx];
+    frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
+    frameOut.color.transfer =
+        (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67) ? PL_COLOR_TRC_HLG : PL_COLOR_TRC_PQ;
+  }
+  else
+  {
+    frameOut.color.primaries = PL_COLOR_PRIM_BT_709;
+    frameOut.color.transfer = PL_COLOR_TRC_BT_1886;
+  }
+  frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
+  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor()
+                             ? PL_COLOR_LEVELS_LIMITED
+                             : PL_COLOR_LEVELS_FULL;
+
+  pl_render_params params = m_plOpts->params;
+  params.border = PL_CLEAR_SKIP;
+
+  // Drain any GL errors so libplacebo's gl_check_err doesn't abort the pass early.
+  while (glGetError() != GL_NO_ERROR)
+    ;
+
+  // Save GL state that libplacebo modifies but may not restore on error paths.
+  GLint savedViewport[4]{};
+  glGetIntegerv(GL_VIEWPORT, savedViewport);
+  GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+  GLint savedScissor[4]{};
+  glGetIntegerv(GL_SCISSOR_BOX, savedScissor);
+  // libplacebo binds its own VAO per-pass and resets to VAO 0 at exit.
+  // In GL/GLES core profile VAO 0 is invalid; restore Kodi's VAO.
+  GLint savedVAO{};
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVAO);
+
+  // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF)
+  bool rendered = false;
+  if (m_plQueue && m_queuePtsOffsetSet)
+  {
+    const auto& buf = this->m_buffers[idx];
+    const float vsyncDuration =
+        1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+
+    pl_queue_params qparams{};
+    qparams.pts = buf.pts - m_queuePtsOffset;
+    qparams.radius = pl_frame_mix_radius(&params);
+    qparams.vsync_duration = vsyncDuration;
+    qparams.timeout = 0;
+
+    pl_frame_mix mix{};
+    const auto status = pl_queue_update(m_plQueue, &mix, &qparams);
+    if (status == PL_QUEUE_OK || status == PL_QUEUE_MORE)
+    {
+      if (!pl_render_image_mix(renderer, &mix, &frameOut, &params))
+        CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_render_image_mix failed");
+      rendered = true;
+    }
+    else if (status == PL_QUEUE_ERR)
+    {
+      CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_queue_update error");
+    }
+  }
+  if (!rendered)
+  {
+    if (!pl_render_image(renderer, &frameIn, &frameOut, &params))
+      CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_render_image failed");
+  }
+
+  // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit.
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, currentFbo);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+  glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+  if (scissorWasEnabled)
+    glEnable(GL_SCISSOR_TEST);
+  else
+    glDisable(GL_SCISSOR_TEST);
+  glScissor(savedScissor[0], savedScissor[1], savedScissor[2], savedScissor[3]);
+
+  glBindVertexArray(savedVAO);
+
+  // Reset active texture unit (libplacebo may leave it at a non-zero index).
+  glActiveTexture(GL_TEXTURE0);
+
+  // Reset shader program: Kodi's CGLShader may skip glUseProgram if it thinks
+  // its program is still bound; if libplacebo's program is active instead the
+  // GUI renders with the wrong shader.
+  glUseProgram(0);
+
+  pl_tex_destroy(gpu, &outTex);
+
+  // Always return true: we own this slot; the base must not fall through to
+  // its own render path which would crash on uninitialized GL planes.
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// ReleasePLBuffer
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
+{
+  PLBuffer& plbuf = m_plBuffers[index];
+
+#if defined(HAVE_LIBVA)
+  if (m_isVAAPI)
+  {
+    pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+    for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
+    {
+      if (plbuf.tex[n])
+      {
+        pl_tex_destroy(gpu, &plbuf.tex[n]);
+        plbuf.tex[n] = nullptr;
+      }
+      if (plbuf.vaapiGLTex[n])
+      {
+        glDeleteTextures(1, &plbuf.vaapiGLTex[n]);
+        plbuf.vaapiGLTex[n] = 0;
+      }
+      if (plbuf.vaapiEGLImage[n] != EGL_NO_IMAGE_KHR)
+      {
+        m_eglDestroyImageKHR(m_eglDisplay, plbuf.vaapiEGLImage[n]);
+        plbuf.vaapiEGLImage[n] = EGL_NO_IMAGE_KHR;
+      }
+      plbuf.planes[n] = {};
+    }
+    for (int f = 0; f < plbuf.vaapiNumFds; ++f)
+    {
+      if (plbuf.vaapiExportedFd[f] >= 0)
+      {
+        close(plbuf.vaapiExportedFd[f]);
+        plbuf.vaapiExportedFd[f] = -1;
+      }
+    }
+    plbuf.vaapiNumFds = 0;
+    plbuf.num_planes = 0;
+    plbuf.loaded = false;
+    return;
+  }
+#endif
+
+  if (!plbuf.loaded)
+    return;
+
+  m_drmTextures[index].Unmap();
+
+  pl_gpu gpu = PL::PLInstance::Get()->GetGpu();
+  for (int n = 0; n < plbuf.num_planes; ++n)
+  {
+    if (plbuf.tex[n])
+    {
+      pl_tex_destroy(gpu, &plbuf.tex[n]);
+      plbuf.tex[n] = nullptr;
+    }
+    plbuf.planes[n] = {};
+  }
+  plbuf.num_planes = 0;
+  plbuf.loaded = false;
+}
