@@ -880,8 +880,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   {
     // Scaling
     XMLUtils::GetString(pElement, "preset", m_libplaceboPreset);
-    XMLUtils::GetString(pElement, "upscaler", m_libplaceboUpscaler);
-    XMLUtils::GetString(pElement, "downscaler", m_libplaceboDownscaler);
     XMLUtils::GetString(pElement, "framemixer", m_libplaceboFrameMixer);
     XMLUtils::GetString(pElement, "antiringing", m_libplaceboAntiringing);
     XMLUtils::GetString(pElement, "sigmoid", m_libplaceboSigmoid);
@@ -903,7 +901,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pElement, "gamutmapping", m_libplaceboGamutMapping);
     XMLUtils::GetString(pElement, "gamutexpansion", m_libplaceboGamutExpansion);
     // Dithering
-    XMLUtils::GetString(pElement, "dither", m_libplaceboDither);
     XMLUtils::GetString(pElement, "dithermethod", m_libplaceboDitherMethod);
     XMLUtils::GetString(pElement, "ditherlutsize", m_libplaceboDitherLutSize);
     // Deinterlacing

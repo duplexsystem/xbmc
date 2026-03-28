@@ -206,8 +206,6 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     // All fields default to empty string, meaning "do not override libplacebo's own default".
     // Values are passed verbatim to pl_options_set_str(); see libplacebo docs for valid values.
     std::string m_libplaceboPreset; ///< "" / "fast" / "high_quality"
-    std::string m_libplaceboUpscaler; ///< filter name, e.g. "ewa_lanczos"
-    std::string m_libplaceboDownscaler; ///< filter name, e.g. "bicubic"
     std::string m_libplaceboFrameMixer; ///< "none" / "oversample" / "linear" / "cubic"
     std::string m_libplaceboAntiringing; ///< float 0–1, e.g. "0.5"
     std::string m_libplaceboDeband; ///< "yes" / "no"
@@ -225,7 +223,6 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     std::string m_libplaceboToneMappingParam; ///< float string
     std::string m_libplaceboGamutMapping; ///< function name, e.g. "perceptual"
     std::string m_libplaceboGamutExpansion; ///< "yes" / "no"
-    std::string m_libplaceboDither; ///< "yes" / "no"
     std::string
         m_libplaceboDitherMethod; ///< "blue_noise" / "ordered_lut" / "white_noise" / "ordered"
     std::string m_libplaceboDitherLutSize; ///< integer string (power of 2)

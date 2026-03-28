@@ -17,9 +17,12 @@
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
 #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
+#include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
+#include "filesystem/File.h"
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
@@ -189,6 +192,28 @@ private:
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
 
+  // CMS — works on both GL and GLES.
+  // m_plCmsManager is our own CColorManager instance (independent of any base-class
+  // manager) so CMS functions identically regardless of TBase.
+  //
+  // Two CMS paths are supported:
+  //  • CMS_MODE_PROFILE: raw ICC file bytes are passed to libplacebo via
+  //    frameOut.profile so libplacebo applies its own HDR-aware ICC processing.
+  //  • CMS_MODE_3DLUT: CColorManager generates a float CLUT that is attached
+  //    to frameOut.lut (PL_LUT_NATIVE) as a display-calibration LUT.
+  std::unique_ptr<CColorManager> m_plCmsManager;
+
+  // ICC profile state (CMS_MODE_PROFILE path)
+  std::vector<uint8_t> m_iccData;     ///< Raw ICC file bytes
+  std::string m_iccPath;              ///< Path last loaded into m_iccData
+  uint64_t m_iccSignature{0};         ///< Precomputed hash for libplacebo cache
+
+  // 3D LUT state (CMS_MODE_3DLUT path)
+  std::vector<float> m_cmsLutData;    ///< Float-normalised CLUT samples
+  pl_custom_lut m_cmsLut{};           ///< References m_cmsLutData.data()
+  int m_plCmsToken{-1};               ///< Last token from CheckConfiguration; -1 = never loaded
+  bool m_cmsLutValid{false};
+
   // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
   //
   // Used for both VAAPI and DRMPRIME paths.  When these extensions and the
@@ -212,6 +237,15 @@ private:
   bool m_hasGLSemaphoreFd{false};
 
   static void ApplyHdrMetadata(PLBuffer& pb, const auto& b);
+
+  // Reloads the CMS 3D LUT from CColorManager when the token changes.
+  void UpdateCmsLut();
+  // Reads the raw ICC file into m_iccData when the path changes.
+  void UpdateIccProfile();
+
+  // Maps a Kodi ESCALINGMETHOD to the corresponding libplacebo filter preset
+  // name string, or nullptr when the method has no direct equivalent.
+  static const char* KodiScalingToPlacebo(ESCALINGMETHOD method);
 
   bool UploadVAAPI(int index, PLBuffer& plbuf);
   bool UploadDRMPRIME(int index, PLBuffer& plbuf);
@@ -250,6 +284,7 @@ template<typename TBase>
 CRendererPLBase<TBase>::CRendererPLBase()
 {
   m_plOpts = pl_options_alloc(PL::PLInstance::Get()->m_plLog);
+  m_plCmsManager = std::make_unique<CColorManager>();
 }
 
 template<typename TBase>
@@ -325,6 +360,12 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
       CLog::Log(LOGERROR, "CRendererPLBase::Configure - pl_queue_create failed");
   }
   m_queuePtsOffsetSet = false;
+
+  // Invalidate CMS state: source primaries may have changed.
+  m_plCmsToken = -1;
+  m_cmsLutValid = false;
+  // Force ICC re-read on next frame so libplacebo picks up any content-driven changes.
+  m_iccPath.clear();
 
   // Invalidate per-session render caches: the FBO or window size may have changed
   // and Kodi's VAO may have been recreated since the last Configure call.
@@ -545,16 +586,22 @@ void CRendererPLBase<TBase>::UpdateVideoFilter()
   pl_options_reset(m_plOpts, nullptr);
 
   const auto& adv = *CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   auto applyStr = [&](const char* key, const std::string& val)
   {
     if (!val.empty())
       pl_options_set_str(m_plOpts, key, val.c_str());
   };
 
-  // Scaling
+  // Scaling — preset first (acts as baseline), then Kodi's scaling method overrides
+  // the upscaler/downscaler so the user-visible Video Settings selector is authoritative.
+  // Fine-grained libplacebo-only controls (frame mixer, antiringing, sigmoid) follow.
   applyStr("preset", adv.m_libplaceboPreset);
-  applyStr("upscaler", adv.m_libplaceboUpscaler);
-  applyStr("downscaler", adv.m_libplaceboDownscaler);
+  if (const char* filter = KodiScalingToPlacebo(this->m_scalingMethod))
+  {
+    pl_options_set_str(m_plOpts, "upscaler", filter);
+    pl_options_set_str(m_plOpts, "downscaler", filter);
+  }
   applyStr("frame_mixer", adv.m_libplaceboFrameMixer);
   applyStr("antiringing_strength", adv.m_libplaceboAntiringing);
   applyStr("sigmoid", adv.m_libplaceboSigmoid);
@@ -585,8 +632,10 @@ void CRendererPLBase<TBase>::UpdateVideoFilter()
       this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
     pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
 
-  // Dithering
-  applyStr("dither", adv.m_libplaceboDither);
+  // Dithering — on/off from Kodi's Video Settings (applies to both GL and GLES).
+  // Method and LUT size have no Kodi UI equivalent so they remain advancedsettings.
+  pl_options_set_str(m_plOpts, "dither",
+                     settings->GetBool(CSettings::SETTING_VIDEOSCREEN_DITHER) ? "yes" : "no");
   applyStr("dither_method", adv.m_libplaceboDitherMethod);
   applyStr("dither_lut_size", adv.m_libplaceboDitherLutSize);
 
@@ -616,6 +665,141 @@ bool CRendererPLBase<TBase>::LoadShadersHook()
   // LinuxRendererGLES.h, so it is visible here as a non-dependent name.
   this->m_renderMethod = RENDER_GLSL;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// KodiScalingToPlacebo — map ESCALINGMETHOD to a libplacebo filter preset name
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+const char* CRendererPLBase<TBase>::KodiScalingToPlacebo(ESCALINGMETHOD method)
+{
+  switch (method)
+  {
+    case VS_SCALINGMETHOD_NEAREST:
+      return "nearest";
+    case VS_SCALINGMETHOD_LINEAR:
+      return "bilinear";
+    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
+      return "mitchell";
+    case VS_SCALINGMETHOD_CUBIC_CATMULL:
+      return "catmull_rom";
+    case VS_SCALINGMETHOD_LANCZOS2:
+    case VS_SCALINGMETHOD_LANCZOS3_FAST:
+    case VS_SCALINGMETHOD_LANCZOS3:
+      return "lanczos";
+    case VS_SCALINGMETHOD_SPLINE36_FAST:
+    case VS_SCALINGMETHOD_SPLINE36:
+      return "spline36";
+    default:
+      return nullptr;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UpdateCmsLut — reload the 3D LUT from CColorManager when settings change
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::UpdateCmsLut()
+{
+  if (!m_plCmsManager->IsEnabled() || !m_plCmsManager->IsValid())
+  {
+    m_cmsLutValid = false;
+    return;
+  }
+
+  // CheckConfiguration returns true when the token and primaries are still
+  // current — no reload needed.
+  if (m_plCmsManager->CheckConfiguration(m_plCmsToken, this->m_srcPrimaries))
+    return;
+
+  int clutSize = 0;
+  int dataSize = 0;
+  if (!CColorManager::Get3dLutSize(CMS_DATA_FMT_RGB, &clutSize, &dataSize))
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UpdateCmsLut - Get3dLutSize failed");
+    m_cmsLutValid = false;
+    return;
+  }
+
+  std::vector<uint16_t> rawData(dataSize / sizeof(uint16_t));
+  if (!m_plCmsManager->GetVideo3dLut(this->m_srcPrimaries, &m_plCmsToken, CMS_DATA_FMT_RGB,
+                                     clutSize, rawData.data()))
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UpdateCmsLut - GetVideo3dLut failed");
+    m_cmsLutValid = false;
+    return;
+  }
+
+  // Convert uint16_t [0, 65535] to float [0.0, 1.0].
+  m_cmsLutData.resize(rawData.size());
+  constexpr float kScale = 1.0f / 65535.0f;
+  for (size_t i = 0; i < rawData.size(); ++i)
+    m_cmsLutData[i] = static_cast<float>(rawData[i]) * kScale;
+
+  m_cmsLut = pl_custom_lut{};
+  m_cmsLut.size[0] = clutSize;
+  m_cmsLut.size[1] = clutSize;
+  m_cmsLut.size[2] = clutSize;
+  m_cmsLut.data = m_cmsLutData.data();
+  // Use the CMS token as a signature so libplacebo can detect changes and
+  // invalidate any internal LUT cache/upload state.
+  m_cmsLut.signature = static_cast<uint64_t>(static_cast<unsigned int>(m_plCmsToken));
+
+  m_cmsLutValid = true;
+  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateCmsLut - loaded {}³ CMS LUT (token {})", clutSize,
+            m_plCmsToken);
+}
+
+// ---------------------------------------------------------------------------
+// UpdateIccProfile — read raw ICC file bytes when the path changes
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::UpdateIccProfile()
+{
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const std::string path = settings->GetString(CSettings::SETTING_VIDEOSCREEN_DISPLAYPROFILE);
+
+  if (path == m_iccPath)
+    return; // Nothing changed.
+
+  m_iccData.clear();
+  m_iccPath.clear();
+  m_iccSignature = 0;
+
+  if (path.empty())
+    return;
+
+  XFILE::CFile f;
+  if (!f.Open(path))
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - cannot open ICC file: {}", path);
+    return;
+  }
+
+  const int64_t size = f.GetLength();
+  if (size <= 0)
+  {
+    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - empty ICC file: {}", path);
+    f.Close();
+    return;
+  }
+
+  m_iccData.resize(static_cast<size_t>(size));
+  f.Read(m_iccData.data(), size);
+  f.Close();
+
+  // Compute signature once so every frame just copies it without re-hashing.
+  pl_icc_profile tmp{};
+  tmp.data = m_iccData.data();
+  tmp.len = m_iccData.size();
+  pl_icc_profile_compute_signature(&tmp);
+  m_iccSignature = tmp.signature;
+
+  m_iccPath = path;
+  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateIccProfile - loaded {} bytes from {}", size, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,6 +1447,44 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
   frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
                                                                            : PL_COLOR_LEVELS_FULL;
+
+  // Display peak luminance — tells libplacebo's tone mapper the target brightness.
+  // GetGuiSdrPeakLuminance() returns the configured or OS-reported display peak in
+  // cd/m², or 0.0 when unknown (libplacebo then uses its own default of 203 cd/m²).
+  {
+    const float peakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
+    if (peakLuminance > 0.0f)
+      frameOut.color.hdr.max_luma = peakLuminance;
+  }
+
+  // CMS — two paths, both GL and GLES:
+  //  • CMS_MODE_PROFILE: pass raw ICC bytes via frameOut.profile so libplacebo
+  //    applies its own HDR-aware ICC processing (better quality than a sampled LUT).
+  //  • CMS_MODE_3DLUT: use CColorManager's pre-sampled CLUT attached as
+  //    frameOut.lut (PL_LUT_NATIVE).
+  {
+    const auto cmsSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
+    const int cmsMode = cmsSettings->GetInt("videoscreen.cmsmode");
+    if (m_plCmsManager->IsEnabled() && cmsMode == CMS_MODE_PROFILE)
+    {
+      UpdateIccProfile();
+      if (!m_iccData.empty())
+      {
+        frameOut.profile.data = m_iccData.data();
+        frameOut.profile.len = m_iccData.size();
+        frameOut.profile.signature = m_iccSignature;
+      }
+    }
+    else
+    {
+      UpdateCmsLut();
+      if (m_cmsLutValid)
+      {
+        frameOut.lut = &m_cmsLut;
+        frameOut.lut_type = PL_LUT_NATIVE;
+      }
+    }
+  }
 
   pl_render_params params = m_plOpts->params;
   params.border = PL_CLEAR_SKIP;
