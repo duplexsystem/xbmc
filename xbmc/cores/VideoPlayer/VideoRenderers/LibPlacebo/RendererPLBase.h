@@ -203,8 +203,8 @@ private:
   using FnGlGenSemaphoresEXT = void (*)(GLsizei, GLuint*);
   using FnGlDeleteSemaphoresEXT = void (*)(GLsizei, const GLuint*);
   using FnGlImportSemaphoreFdEXT = void (*)(GLuint, GLenum, GLint);
-  using FnGlWaitSemaphoreEXT = void (*)(GLuint, GLuint, const GLuint*, GLuint,
-                                        const GLuint*, const GLenum*);
+  using FnGlWaitSemaphoreEXT =
+      void (*)(GLuint, GLuint, const GLuint*, GLuint, const GLuint*, const GLenum*);
 
   FnGlGenSemaphoresEXT m_glGenSemaphoresEXT{nullptr};
   FnGlDeleteSemaphoresEXT m_glDeleteSemaphoresEXT{nullptr};
@@ -222,10 +222,14 @@ private:
   {
     switch (deg)
     {
-      case 90:  return PL_ROTATION_270;
-      case 180: return PL_ROTATION_180;
-      case 270: return PL_ROTATION_90;
-      default:  return PL_ROTATION_0;
+      case 90:
+        return PL_ROTATION_270;
+      case 180:
+        return PL_ROTATION_180;
+      case 270:
+        return PL_ROTATION_90;
+      default:
+        return PL_ROTATION_0;
     }
   }
 
@@ -287,7 +291,6 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_colorSpace.transfer = pl_transfer_from_av(picture.color_transfer);
   m_chromaLocation = pl_chroma_from_av(picture.chroma_position);
 
-  
   // Probe EGL DMA-buf modifier support unconditionally: applies to both VAAPI
   // and DRMPRIME.  When present, eglCreateImageKHR implicitly attaches the
   // DMA-buf reservation fence to the EGLImage so the GPU waits automatically —
@@ -682,8 +685,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
 template<typename TBase>
 void CRendererPLBase<TBase>::ApplyHdrMetadata(PLBuffer& pb, const auto& b)
 {
-  if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-      b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+  if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 || b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
   {
     pl_hdr_metadata& hdr = pb.colorSpace.hdr;
     hdr = {};
@@ -787,9 +789,9 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   }
 
   VADRMPRIMESurfaceDescriptor desc{};
-  VAStatus vaStatus = vaExportSurfaceHandle(
-      vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
+  VAStatus vaStatus =
+      vaExportSurfaceHandle(vadsp, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                            VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
   if (vaStatus != VA_STATUS_SUCCESS)
   {
     CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - vaExportSurfaceHandle failed: {}",
@@ -879,8 +881,8 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     }
     *a++ = EGL_NONE;
 
-    EGLImageKHR eglImage = m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT,
-                                               EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    EGLImageKHR eglImage =
+        m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
     if (!eglImage)
     {
       CLog::Log(LOGERROR,
@@ -1138,9 +1140,9 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     pdata[n].pixels = src[n];
     pdata[n].row_stride = srcStrides[n];
     pdata[n].width = (n > 0) ? (this->m_sourceWidth + (1 << chromaShiftW) - 1) >> chromaShiftW
-                              : this->m_sourceWidth;
+                             : this->m_sourceWidth;
     pdata[n].height = (n > 0) ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
-                               : this->m_sourceHeight;
+                              : this->m_sourceHeight;
 
     if (!pl_upload_plane(gpu, &plbuf.planes[n], &plbuf.tex[n], &pdata[n]))
     {
@@ -1211,8 +1213,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   // on every frame is expensive: some drivers flush pending GPU work at this point
   // and libplacebo discards cached per-target state, forcing a full re-initialisation
   // on the next pl_render_image[_mix] call.
-  if (!m_cachedFboTex || fboId != m_cachedFboId || viewW != m_cachedFboW ||
-      viewH != m_cachedFboH)
+  if (!m_cachedFboTex || fboId != m_cachedFboId || viewW != m_cachedFboW || viewH != m_cachedFboH)
   {
     if (m_cachedFboTex)
       pl_tex_destroy(gpu, &m_cachedFboTex);
@@ -1317,11 +1318,9 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
       if (!fbuf.fenceSemaphore)
         continue;
 
-      GLenum layouts[3] = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT,
-                           GL_LAYOUT_GENERAL_EXT};
+      GLenum layouts[3] = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
       m_glWaitSemaphoreEXT(fbuf.fenceSemaphore, 0, nullptr,
-                            static_cast<GLuint>(fbuf.nFenceTextures),
-                            fbuf.fenceTextures, layouts);
+                           static_cast<GLuint>(fbuf.nFenceTextures), fbuf.fenceTextures, layouts);
       m_glDeleteSemaphoresEXT(1, &fbuf.fenceSemaphore);
       fbuf.fenceSemaphore = 0;
       fbuf.nFenceTextures = 0;
