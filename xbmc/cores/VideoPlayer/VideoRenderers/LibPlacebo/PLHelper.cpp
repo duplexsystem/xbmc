@@ -198,8 +198,6 @@ const char* PL::PLInstance::pl_color_system_short_name(pl_color_system sys)
   return pl_color_system_short_names[sys];
 }
 
-
-
 /*Settings conversion*/
 const pl_tone_map_function* PL::PLInstance::GetToneMappingFunction(pl_tone_mapping method)
 {
@@ -282,7 +280,8 @@ void PL::RenderConfig::ResetCmsState()
   m_iccSignature = 0;
 }
 
-void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings)
+void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
+                                         const CVideoSettings& videoSettings)
 {
   pl_options_reset(m_plOpts, nullptr);
 
@@ -296,9 +295,11 @@ void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVi
   }
 
   pl_options_set_str(m_plOpts, "deband",
-                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND) ? "yes" : "no");
-  pl_options_set_str(m_plOpts, "peak_detect",
-                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT) ? "yes" : "no");
+                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND) ? "yes"
+                                                                                         : "no");
+  pl_options_set_str(
+      m_plOpts, "peak_detect",
+      settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT) ? "yes" : "no");
   if (settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
     pl_options_set_str(m_plOpts, "frame_mixer", "oversample");
 
@@ -369,8 +370,8 @@ void PL::RenderConfig::UpdateCmsLut(AVColorPrimaries srcPrimaries)
   }
 
   std::vector<uint16_t> rawData(dataSize / sizeof(uint16_t));
-  if (!m_plCmsManager->GetVideo3dLut(srcPrimaries, &m_plCmsToken, CMS_DATA_FMT_RGB,
-                                     clutSize, rawData.data()))
+  if (!m_plCmsManager->GetVideo3dLut(srcPrimaries, &m_plCmsToken, CMS_DATA_FMT_RGB, clutSize,
+                                     rawData.data()))
   {
     CLog::Log(LOGERROR, "PL::RenderConfig::UpdateCmsLut - GetVideo3dLut failed");
     m_cmsLutValid = false;
@@ -390,7 +391,8 @@ void PL::RenderConfig::UpdateCmsLut(AVColorPrimaries srcPrimaries)
   m_cmsLut.signature = static_cast<uint64_t>(static_cast<unsigned int>(m_plCmsToken));
 
   m_cmsLutValid = true;
-  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateCmsLut - loaded {}³ CMS LUT (token {})", clutSize, m_plCmsToken);
+  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateCmsLut - loaded {}³ CMS LUT (token {})", clutSize,
+            m_plCmsToken);
 }
 
 void PL::RenderConfig::UpdateIccProfile()
@@ -442,7 +444,8 @@ void PL::RenderConfig::UpdateIccProfile()
   }
 
   m_iccPath = path;
-  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateIccProfile - opened ICC profile ({} bytes): {}", size, path);
+  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateIccProfile - opened ICC profile ({} bytes): {}",
+            size, path);
 }
 
 void PL::RenderConfig::ApplyCMS(pl_frame& frameOut, AVColorPrimaries srcPrimaries)

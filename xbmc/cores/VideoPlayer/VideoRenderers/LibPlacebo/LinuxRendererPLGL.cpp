@@ -7,6 +7,7 @@
  */
 
 #include "LinuxRendererPLGL.h"
+
 #include "PLHelper.h"
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
@@ -43,7 +44,8 @@ CBaseRenderer* CLinuxRendererPLGL::Create(CVideoBuffer* buffer)
 
   if (!isSW && !isVAAPI && !isDRMPRIME)
   {
-    CLog::Log(LOGDEBUG, "CLinuxRendererPLGL::Create - unsupported buffer type (format {}), skipping",
+    CLog::Log(LOGDEBUG,
+              "CLinuxRendererPLGL::Create - unsupported buffer type (format {}), skipping",
               static_cast<int>(buffer->GetFormat()));
     return nullptr;
   }

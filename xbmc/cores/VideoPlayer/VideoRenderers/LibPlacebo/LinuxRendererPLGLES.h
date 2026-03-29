@@ -11,8 +11,8 @@
 // LinuxRendererGLES.h must precede LinuxRendererPLBase.h so that renderer-specific
 // types (CPictureBuffer, RenderMethod, EShaderFormat, etc.) are already declared
 // when the template body is parsed.
-#include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
 #include "LinuxRendererPLBase.h"
+#include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
 
 /**
  * @brief Linux libplacebo renderer using an OpenGL ES GPU context.

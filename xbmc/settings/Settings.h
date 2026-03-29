@@ -142,8 +142,7 @@ public:
   static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND = "videoplayer.libplacebo.deband";
   static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT =
       "videoplayer.libplacebo.peakdetect";
-  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX =
-      "videoplayer.libplacebo.framemix";
+  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX = "videoplayer.libplacebo.framemix";
   static constexpr auto SETTING_VIDEOPLAYER_QUEUETIMESIZE = "videoplayer.queuetimesize";
   static constexpr auto SETTING_VIDEOPLAYER_QUEUEDATASIZE = "videoplayer.queuedatasize";
   static constexpr auto SETTING_MYVIDEOS_SELECTACTION = "myvideos.selectaction";

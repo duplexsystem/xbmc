@@ -7,6 +7,7 @@
  */
 
 #include "LinuxRendererPLGLES.h"
+
 #include "PlHelper.h"
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
@@ -42,9 +43,10 @@ CBaseRenderer* CLinuxRendererPLGLES::Create(CVideoBuffer* buffer)
 
   if (!isDRMPRIME && !isVAAPI && !isSW)
   {
-    CLog::Log(LOGDEBUG,
-              "CLinuxRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
-              static_cast<int>(buffer->GetFormat()));
+    CLog::Log(
+        LOGDEBUG,
+        "CLinuxRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
+        static_cast<int>(buffer->GetFormat()));
     return nullptr;
   }
 

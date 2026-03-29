@@ -288,3 +288,5 @@ CLAUDE.md
 .claude/
 
 libplacebo
+
+tools/android/packaging/build/reports/problems/problems-report.html

@@ -51,9 +51,9 @@
 #define SETTING_VIDEO_VDPAU_NOISE         "vdpau.noise"
 #define SETTING_VIDEO_VDPAU_SHARPNESS     "vdpau.sharpness"
 
-#define SETTING_VIDEO_LIBPLACEBO_DEBAND     "video.libplacebo.deband"
+#define SETTING_VIDEO_LIBPLACEBO_DEBAND "video.libplacebo.deband"
 #define SETTING_VIDEO_LIBPLACEBO_PEAKDETECT "video.libplacebo.peakdetect"
-#define SETTING_VIDEO_LIBPLACEBO_FRAMEMIX   "video.libplacebo.framemix"
+#define SETTING_VIDEO_LIBPLACEBO_FRAMEMIX "video.libplacebo.framemix"
 
 #define SETTING_VIDEO_INTERLACEMETHOD     "video.interlacemethod"
 #define SETTING_VIDEO_SCALINGMETHOD       "video.scalingmethod"
@@ -485,14 +485,14 @@ void CGUIDialogVideoSettings::InitializeSettings()
     if (globalSettings->GetSetting(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND))
     {
       AddToggle(groupVideo, SETTING_VIDEO_LIBPLACEBO_DEBAND, 13477, SettingLevel::Basic,
-                globalSettings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND),
-                false, true, 13478);
+                globalSettings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND), false,
+                true, 13478);
       AddToggle(groupVideo, SETTING_VIDEO_LIBPLACEBO_PEAKDETECT, 13479, SettingLevel::Basic,
                 globalSettings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT),
                 false, true, 13480);
       AddToggle(groupVideo, SETTING_VIDEO_LIBPLACEBO_FRAMEMIX, 13481, SettingLevel::Basic,
-                globalSettings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX),
-                false, true, 13482);
+                globalSettings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX), false,
+                true, 13482);
     }
   }
 

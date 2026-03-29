@@ -12,6 +12,8 @@
 #if defined(HAS_GL) || defined(HAS_GLES)
 #include "libplacebo/opengl.h"
 #endif
+#include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
+#include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "libplacebo/log.h"
 #include "libplacebo/renderer.h"
 #include "libplacebo/utils/frame_queue.h"
@@ -19,9 +21,6 @@
 
 #include <libplacebo/options.h>
 #include <libplacebo/shaders/icc.h>
-
-#include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
-#include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 extern "C"
 {
 #include <libavutil/dovi_meta.h>
@@ -32,17 +31,14 @@ extern "C"
 #include <string>
 #include <vector>
 
-
 #include <libavutil/hdr_dynamic_metadata.h>
 #include <libavutil/mastering_display_metadata.h>
-
 
 #define MAX_FRAME_PASSES 256
 #define MAX_BLEND_PASSES 8
 #define MAX_BLEND_FRAMES 8
 namespace PL
 {
-
 
 enum pl_tone_mapping
 {
@@ -108,8 +104,6 @@ public:
   static const char* pl_color_system_shorts_name[PL_COLOR_SYSTEM_COUNT];
   static const char* pl_color_system_short_name(pl_color_system sys);
 
-
-
   const pl_tone_map_function* GetToneMappingFunction(pl_tone_mapping method);
 
 private:
@@ -134,7 +128,10 @@ constexpr pl_rotation RotationFromOrientation(unsigned int deg)
 const char* KodiScalingToPlacebo(ESCALINGMETHOD method);
 
 template<typename TBuffer>
-void ApplyHdrMetadata(pl_color_space& colorSpace, pl_color_repr& colorRepr, pl_dovi_metadata& doviMetadata, const TBuffer& b)
+void ApplyHdrMetadata(pl_color_space& colorSpace,
+                      pl_color_repr& colorRepr,
+                      pl_dovi_metadata& doviMetadata,
+                      const TBuffer& b)
 {
   if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 || b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
   {

@@ -109,12 +109,12 @@ private:
   // DeleteTexture and the destructor.
   struct SWBuffer
   {
-    GLuint pbo[3]{0, 0, 0};              ///< Pixel Buffer Objects for async CPU→GPU DMA
-    GLsizeiptr pboSize[3]{0, 0, 0};      ///< Allocated PBO size (bytes) for resize detection
-    GLuint tex[3]{0, 0, 0};              ///< Target GL_TEXTURE_2D textures
-    int texW[3]{0, 0, 0};                ///< Cached dimensions for resize detection
+    GLuint pbo[3]{0, 0, 0}; ///< Pixel Buffer Objects for async CPU→GPU DMA
+    GLsizeiptr pboSize[3]{0, 0, 0}; ///< Allocated PBO size (bytes) for resize detection
+    GLuint tex[3]{0, 0, 0}; ///< Target GL_TEXTURE_2D textures
+    int texW[3]{0, 0, 0}; ///< Cached dimensions for resize detection
     int texH[3]{0, 0, 0};
-    GLenum texIformat[3]{0, 0, 0};       ///< Cached iformat for format-change detection
+    GLenum texIformat[3]{0, 0, 0}; ///< Cached iformat for format-change detection
   };
 
   struct PLBuffer
@@ -209,8 +209,6 @@ private:
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
 
-
-
   // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
   //
   // Used for both VAAPI and DRMPRIME paths.  When these extensions and the
@@ -233,13 +231,9 @@ private:
   FnGlWaitSemaphoreEXT m_glWaitSemaphoreEXT{nullptr};
   bool m_hasGLSemaphoreFd{false};
 
-
-
   bool UploadVAAPI(int index, PLBuffer& plbuf);
   bool UploadDRMPRIME(int index, PLBuffer& plbuf);
   bool UploadSoftware(int index, PLBuffer& plbuf);
-
-
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -252,9 +246,8 @@ private:
   void ReleaseSWBuffer(int index);
 
   // Map pl_plane_data component layout → GL iformat/format/type/bytesPerPixel.
-  static bool PlaneDataToGLFormats(const pl_plane_data& pd,
-                                   GLenum& iformat, GLenum& format,
-                                   GLenum& type, int& bytesPerPixel);
+  static bool PlaneDataToGLFormats(
+      const pl_plane_data& pd, GLenum& iformat, GLenum& format, GLenum& type, int& bytesPerPixel);
 };
 
 // =============================================================================
@@ -295,8 +288,8 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
 
 template<typename TBase>
 bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
-                                       float fps,
-                                       unsigned int orientation)
+                                            float fps,
+                                            unsigned int orientation)
 {
   if (!TBase::Configure(picture, fps, orientation))
     return false;
@@ -468,9 +461,9 @@ void CLinuxRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, i
 
 template<typename TBase>
 bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
-                                         pl_tex* /*tex*/,
-                                         const struct pl_source_frame* src,
-                                         struct pl_frame* out)
+                                              pl_tex* /*tex*/,
+                                              const struct pl_source_frame* src,
+                                              struct pl_frame* out)
 {
   // libplacebo does not zero the pl_frame before calling map(); initialize it
   // so that crop={0,0,0,0} (full texture), field=PL_FIELD_NONE, etc. are clean.
@@ -507,8 +500,8 @@ bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
 
 template<typename TBase>
 void CLinuxRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
-                                           struct pl_frame* /*frame*/,
-                                           const struct pl_source_frame* src)
+                                                struct pl_frame* /*frame*/,
+                                                const struct pl_source_frame* src)
 {
   // Textures remain in m_plBuffers and are freed by DeleteTexture / ReleasePLBuffer.
   delete static_cast<QueuedFrameState*>(src->frame_data);
@@ -604,8 +597,6 @@ bool CLinuxRendererPLBase<TBase>::LoadShadersHook()
   return true;
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Texture lifecycle
 // ---------------------------------------------------------------------------
@@ -665,8 +656,6 @@ bool CLinuxRendererPLBase<TBase>::UploadTexture(int index)
 
   return UploadSoftware(index, plbuf);
 }
-
-
 
 // ---------------------------------------------------------------------------
 // UploadVAAPI — VAAPI: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap
@@ -877,7 +866,8 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
     if (!plbuf.tex[i])
     {
-      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}", i);
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}",
+                i);
       success = false;
     }
   }
@@ -1073,9 +1063,8 @@ void CLinuxRendererPLBase<TBase>::ReleaseSWBuffer(int index)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CLinuxRendererPLBase<TBase>::PlaneDataToGLFormats(const pl_plane_data& pd,
-                                                  GLenum& iformat, GLenum& format,
-                                                  GLenum& type, int& bytesPerPixel)
+bool CLinuxRendererPLBase<TBase>::PlaneDataToGLFormats(
+    const pl_plane_data& pd, GLenum& iformat, GLenum& format, GLenum& type, int& bytesPerPixel)
 {
   int numComp = 0;
   for (int c = 0; c < 4; ++c)
@@ -1156,12 +1145,10 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
 
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
-    const int planeW = (n > 0)
-        ? (this->m_sourceWidth  + (1 << chromaShiftW) - 1) >> chromaShiftW
-        : this->m_sourceWidth;
-    const int planeH = (n > 0)
-        ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
-        : this->m_sourceHeight;
+    const int planeW = (n > 0) ? (this->m_sourceWidth + (1 << chromaShiftW) - 1) >> chromaShiftW
+                               : this->m_sourceWidth;
+    const int planeH = (n > 0) ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
+                               : this->m_sourceHeight;
 
     GLenum iformat, glFormat, glType;
     int bytesPerPixel;
@@ -1191,8 +1178,8 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(iformat),
-                   planeW, planeH, 0, glFormat, glType, nullptr);
+      glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(iformat), planeW, planeH, 0, glFormat,
+                   glType, nullptr);
       glBindTexture(GL_TEXTURE_2D, 0);
 
       sw.texW[n] = planeW;
@@ -1222,7 +1209,8 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     if (!pboPtr)
     {
       glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadSoftware - glMapBufferRange failed for plane {}", n);
+      CLog::Log(LOGERROR,
+                "CLinuxRendererPLBase::UploadSoftware - glMapBufferRange failed for plane {}", n);
       return false;
     }
 
