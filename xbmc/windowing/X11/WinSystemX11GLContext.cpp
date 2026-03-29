@@ -24,7 +24,7 @@
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGL.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #if defined(HAS_LIBPLACEBO)
-#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/RendererPLGL.h"
+#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/LinuxRendererPLGL.h"
 #endif
 #include "guilib/DispResource.h"
 #include "rendering/gl/ScreenshotSurfaceGL.h"
@@ -290,7 +290,7 @@ bool CWinSystemX11GLContext::RefreshGLContext(bool force)
   VIDEOPLAYER::CRendererFactory::ClearRenderer();
   CLinuxRendererGL::Register();
 #if defined(HAS_LIBPLACEBO)
-  CRendererPLGL::Register();
+  CLinuxRendererPLGL::Register();
 #endif
 
   CScreenshotSurfaceGL::Register();

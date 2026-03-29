@@ -8,17 +8,16 @@
 
 #pragma once
 
-// LinuxRendererGLES.h must precede RendererPLBase.h so that renderer-specific
+// LinuxRendererGLES.h must precede LinuxRendererPLBase.h so that renderer-specific
 // types (CPictureBuffer, RenderMethod, EShaderFormat, etc.) are already declared
 // when the template body is parsed.
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
-
-#include "RendererPLBase.h"
+#include "LinuxRendererPLBase.h"
 
 /**
  * @brief Linux libplacebo renderer using an OpenGL ES GPU context.
  *
- * Subclasses CLinuxRendererGLES via the CRendererPLBase<> CRTP mixin and intercepts
+ * Subclasses CLinuxRendererGLES via the CLinuxRendererPLBase<> CRTP mixin and intercepts
  * the render hook to pass frames to libplacebo instead of Kodi's YUV shader pipeline.
  *
  * VAAPI hardware-decoded frames are imported zero-copy via vaExportSurfaceHandle
@@ -26,7 +25,7 @@
  * pl_opengl_wrap). DRMPRIME frames use CDRMPRIMETexture (DMA-buf → EGLImage →
  * GL_TEXTURE_EXTERNAL_OES). Software-decoded frames fall back to pl_upload_plane().
  */
-class CRendererPLGLES : public CRendererPLBase<CLinuxRendererGLES>
+class CLinuxRendererPLGLES : public CLinuxRendererPLBase<CLinuxRendererGLES>
 {
 public:
   static CBaseRenderer* Create(CVideoBuffer* buffer);

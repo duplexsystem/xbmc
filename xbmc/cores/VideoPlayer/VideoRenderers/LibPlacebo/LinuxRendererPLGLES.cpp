@@ -6,14 +6,12 @@
  *  See LICENSES/README.md for more information.
  */
 
-#include "RendererPLGL.h"
-
-#include "PLHelper.h"
+#include "LinuxRendererPLGLES.h"
+#include "PlHelper.h"
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "utils/log.h"
-
-#include "system_egl.h"
+#include "windowing/linux/WinSystemEGL.h"
 
 #if defined(HAVE_LIBVA)
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
@@ -27,24 +25,25 @@
 // Static factory
 // ---------------------------------------------------------------------------
 
-CBaseRenderer* CRendererPLGL::Create(CVideoBuffer* buffer)
+CBaseRenderer* CLinuxRendererPLGLES::Create(CVideoBuffer* buffer)
 {
   if (!buffer)
     return nullptr;
 
-  pl_bit_encoding bits{};
-  pl_plane_data pdata[4]{};
-  bool isSW = (pl_plane_data_from_pixfmt(pdata, &bits, buffer->GetFormat()) > 0);
   bool isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(buffer) != nullptr);
 #if defined(HAVE_LIBVA)
   bool isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(buffer) != nullptr);
 #else
   constexpr bool isVAAPI = false;
 #endif
+  pl_bit_encoding bits{};
+  pl_plane_data pdata[4]{};
+  bool isSW = (pl_plane_data_from_pixfmt(pdata, &bits, buffer->GetFormat()) > 0);
 
-  if (!isSW && !isVAAPI && !isDRMPRIME)
+  if (!isDRMPRIME && !isVAAPI && !isSW)
   {
-    CLog::Log(LOGDEBUG, "CRendererPLGL::Create - unsupported buffer type (format {}), skipping",
+    CLog::Log(LOGDEBUG,
+              "CLinuxRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
               static_cast<int>(buffer->GetFormat()));
     return nullptr;
   }
@@ -52,16 +51,16 @@ CBaseRenderer* CRendererPLGL::Create(CVideoBuffer* buffer)
   auto* inst = PL::PLInstance::Get().get();
   if (!inst->Init())
   {
-    CLog::Log(LOGERROR, "CRendererPLGL::Create - PLInstance::Init() failed");
+    CLog::Log(LOGERROR, "CLinuxRendererPLGLES::Create - PLInstance::Init() failed");
     return nullptr;
   }
 
-  return new CRendererPLGL();
+  return new CLinuxRendererPLGLES();
 }
 
-bool CRendererPLGL::Register()
+bool CLinuxRendererPLGLES::Register()
 {
-  VIDEOPLAYER::CRendererFactory::RegisterRenderer("libplacebo", CRendererPLGL::Create);
+  VIDEOPLAYER::CRendererFactory::RegisterRenderer("libplacebo", CLinuxRendererPLGLES::Create);
   return true;
 }
 
@@ -69,8 +68,12 @@ bool CRendererPLGL::Register()
 // Platform-specific hooks
 // ---------------------------------------------------------------------------
 
-EGLDisplay CRendererPLGL::GetDRMPRIMEEGLDisplay() const
+EGLDisplay CLinuxRendererPLGLES::GetDRMPRIMEEGLDisplay() const
 {
-  // Desktop GL: the current EGL display is always valid for DRMPRIME init.
-  return eglGetCurrentDisplay();
+  // On GLES/EGL platforms, retrieve the display via the windowing system rather
+  // than eglGetCurrentDisplay() to ensure the correct display is used on
+  // multi-display setups (e.g. GBM/RPi where eglGetCurrentDisplay may differ).
+  auto* winEGL =
+      dynamic_cast<KODI::WINDOWING::LINUX::CWinSystemEGL*>(CServiceBroker::GetWinSystem());
+  return winEGL ? winEGL->GetEGLDisplay() : EGL_NO_DISPLAY;
 }

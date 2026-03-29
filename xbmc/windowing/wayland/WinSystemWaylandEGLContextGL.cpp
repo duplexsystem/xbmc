@@ -14,7 +14,7 @@
 #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererOpenGL.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGL.h"
 #if defined(HAS_LIBPLACEBO)
-#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/RendererPLGL.h"
+#include "cores/VideoPlayer/VideoRenderers/LibPlacebo/LinuxRendererPLGL.h"
 #endif
 #include "rendering/gl/ScreenshotSurfaceGL.h"
 #include "utils/BufferObjectFactory.h"
@@ -46,7 +46,7 @@ bool CWinSystemWaylandEGLContextGL::InitWindowSystem()
 
   CLinuxRendererGL::Register();
 #if defined(HAS_LIBPLACEBO)
-  CRendererPLGL::Register();
+  CLinuxRendererPLGL::Register();
 #endif
   RETRO::CRPProcessInfo::RegisterRendererFactory(new RETRO::CRendererFactoryDMAOpenGL);
   RETRO::CRPProcessInfo::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGL);

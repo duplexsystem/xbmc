@@ -75,11 +75,11 @@ extern "C"
  *     pass to CDRMPRIMETexture::Init()
  */
 template<typename TBase>
-class CRendererPLBase : public TBase
+class CLinuxRendererPLBase : public TBase
 {
 public:
-  CRendererPLBase();
-  ~CRendererPLBase() override;
+  CLinuxRendererPLBase();
+  ~CLinuxRendererPLBase() override;
 
   bool Configure(const VideoPicture& picture, float fps, unsigned int orientation) override;
   bool ConfigChanged(const VideoPicture& picture) override;
@@ -166,7 +166,7 @@ private:
   struct QueuedFrameState
   {
     int bufferIndex;
-    CRendererPLBase* renderer;
+    CLinuxRendererPLBase* renderer;
   };
   // libplacebo guarantees exactly one of unmap/discard is called per pushed frame.
   // QueuedFrameState must be trivially destructible so raw delete is safe and
@@ -262,13 +262,13 @@ private:
 // =============================================================================
 
 template<typename TBase>
-CRendererPLBase<TBase>::CRendererPLBase()
+CLinuxRendererPLBase<TBase>::CLinuxRendererPLBase()
 {
   m_plConfig = std::make_unique<PL::RenderConfig>();
 }
 
 template<typename TBase>
-CRendererPLBase<TBase>::~CRendererPLBase()
+CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
 {
   for (int i = 0; i < NUM_BUFFERS; ++i)
   {
@@ -294,7 +294,7 @@ CRendererPLBase<TBase>::~CRendererPLBase()
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
+bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
                                        float fps,
                                        unsigned int orientation)
 {
@@ -340,7 +340,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   {
     m_plQueue = pl_queue_create(PL::PLInstance::Get()->m_plGpu);
     if (!m_plQueue)
-      CLog::Log(LOGERROR, "CRendererPLBase::Configure - pl_queue_create failed");
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::Configure - pl_queue_create failed");
   }
   m_queuePtsOffsetSet = false;
 
@@ -403,13 +403,13 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 }
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::ConfigChanged(const VideoPicture& picture)
+bool CLinuxRendererPLBase<TBase>::ConfigChanged(const VideoPicture& picture)
 {
   return picture.videoBuffer->GetFormat() != m_format;
 }
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
+bool CLinuxRendererPLBase<TBase>::Flush(bool saveBuffers)
 {
   if (m_plQueue)
   {
@@ -433,7 +433,7 @@ bool CRendererPLBase<TBase>::Flush(bool saveBuffers)
 }
 
 template<typename TBase>
-void CRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, int index)
+void CLinuxRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, int index)
 {
   TBase::AddVideoPicture(picture, index);
   m_plBuffers[index].loaded = false;
@@ -455,9 +455,9 @@ void CRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, int in
   if (picture.iFlags & DVP_FLAG_INTERLACED)
     src.first_field = (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
   src.frame_data = qf;
-  src.map = &CRendererPLBase<TBase>::MapCallback;
-  src.unmap = &CRendererPLBase<TBase>::UnmapCallback;
-  src.discard = &CRendererPLBase<TBase>::DiscardCallback;
+  src.map = &CLinuxRendererPLBase<TBase>::MapCallback;
+  src.unmap = &CLinuxRendererPLBase<TBase>::UnmapCallback;
+  src.discard = &CLinuxRendererPLBase<TBase>::DiscardCallback;
 
   pl_queue_push(m_plQueue, &src);
 }
@@ -467,7 +467,7 @@ void CRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, int in
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
+bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
                                          pl_tex* /*tex*/,
                                          const struct pl_source_frame* src,
                                          struct pl_frame* out)
@@ -477,7 +477,7 @@ bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   *out = {};
 
   auto* qf = static_cast<QueuedFrameState*>(src->frame_data);
-  CRendererPLBase<TBase>* r = qf->renderer;
+  CLinuxRendererPLBase<TBase>* r = qf->renderer;
   const int idx = qf->bufferIndex;
 
   if (!r->UploadTexture(idx))
@@ -506,7 +506,7 @@ bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
 }
 
 template<typename TBase>
-void CRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
+void CLinuxRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
                                            struct pl_frame* /*frame*/,
                                            const struct pl_source_frame* src)
 {
@@ -515,7 +515,7 @@ void CRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
 }
 
 template<typename TBase>
-void CRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
+void CLinuxRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
 {
   delete static_cast<QueuedFrameState*>(src->frame_data);
 }
@@ -525,7 +525,7 @@ void CRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-CRenderInfo CRendererPLBase<TBase>::GetRenderInfo()
+CRenderInfo CLinuxRendererPLBase<TBase>::GetRenderInfo()
 {
   CRenderInfo info = TBase::GetRenderInfo();
   info.m_deintMethods.push_back(VS_INTERLACEMETHOD_NONE);
@@ -537,7 +537,7 @@ CRenderInfo CRendererPLBase<TBase>::GetRenderInfo()
 }
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
+bool CLinuxRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
 {
   switch (feature)
   {
@@ -556,7 +556,7 @@ bool CRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
 }
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
+bool CLinuxRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
 {
   switch (method)
   {
@@ -582,20 +582,20 @@ bool CRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-void CRendererPLBase<TBase>::UpdateVideoFilter()
+void CLinuxRendererPLBase<TBase>::UpdateVideoFilter()
 {
   TBase::UpdateVideoFilter();
   m_plConfig->UpdateVideoFilter(this->m_scalingMethod, this->m_videoSettings);
 }
 
 template<typename TBase>
-EShaderFormat CRendererPLBase<TBase>::GetShaderFormat()
+EShaderFormat CLinuxRendererPLBase<TBase>::GetShaderFormat()
 {
   return SHADER_NONE;
 }
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::LoadShadersHook()
+bool CLinuxRendererPLBase<TBase>::LoadShadersHook()
 {
   // Prevent TBase from loading its own YUV shaders; we render via RenderHook.
   // RENDER_GLSL is a file-scope enum value defined in both LinuxRendererGL.h and
@@ -611,7 +611,7 @@ bool CRendererPLBase<TBase>::LoadShadersHook()
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::CreateTexture(int index)
+bool CLinuxRendererPLBase<TBase>::CreateTexture(int index)
 {
   auto& buf = this->m_buffers[index];
   auto& im = buf.image;
@@ -629,7 +629,7 @@ bool CRendererPLBase<TBase>::CreateTexture(int index)
 }
 
 template<typename TBase>
-void CRendererPLBase<TBase>::DeleteTexture(int index)
+void CLinuxRendererPLBase<TBase>::DeleteTexture(int index)
 {
   ReleasePLBuffer(index);
   ReleaseSWBuffer(index);
@@ -644,7 +644,7 @@ void CRendererPLBase<TBase>::DeleteTexture(int index)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::UploadTexture(int index)
+bool CLinuxRendererPLBase<TBase>::UploadTexture(int index)
 {
   auto& buf = this->m_buffers[index];
   if (!buf.videoBuffer)
@@ -674,7 +674,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
 
 #if defined(HAVE_LIBVA)
 template<typename TBase>
-bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
+bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
 {
   auto& buf = this->m_buffers[index];
 
@@ -684,7 +684,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
 
   if (!m_eglCreateImageKHR || !m_eglDestroyImageKHR || !m_glEGLImageTargetTexture2DOES)
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - EGL interop not available");
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - EGL interop not available");
     return false;
   }
 
@@ -693,7 +693,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(vaaPic->avFrame->data[3]));
   if (surface == VA_INVALID_ID)
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - no valid VAAPI surface");
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - no valid VAAPI surface");
     return false;
   }
 
@@ -733,7 +733,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
                             VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
   if (vaStatus != VA_STATUS_SUCCESS)
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - vaExportSurfaceHandle failed: {}",
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - vaExportSurfaceHandle failed: {}",
               vaErrorStr(vaStatus));
     return false;
   }
@@ -825,7 +825,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     if (!eglImage)
     {
       CLog::Log(LOGERROR,
-                "CRendererPLBase::UploadVAAPI - eglCreateImageKHR failed for plane {} "
+                "CLinuxRendererPLBase::UploadVAAPI - eglCreateImageKHR failed for plane {} "
                 "(EGL error 0x{:x})",
                 i, static_cast<unsigned>(eglGetError()));
       success = false;
@@ -859,7 +859,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
         break;
       default:
         CLog::Log(LOGERROR,
-                  "CRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
+                  "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
                   layer.drm_format, i);
         success = false;
         break;
@@ -877,7 +877,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
     if (!plbuf.tex[i])
     {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}", i);
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}", i);
       success = false;
     }
   }
@@ -944,7 +944,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
+bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
 {
   auto& buf = this->m_buffers[index];
 
@@ -955,7 +955,7 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
   if (!m_drmTextures[index].Map(drmBuf))
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::UploadDRMPRIME - CDRMPRIMETexture::Map failed");
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIME - CDRMPRIMETexture::Map failed");
     return false;
   }
 
@@ -980,7 +980,7 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
   if (!plbuf.tex[0])
   {
-    CLog::Log(LOGERROR, "CRendererPLBase::UploadDRMPRIME - pl_opengl_wrap failed");
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIME - pl_opengl_wrap failed");
     m_drmTextures[index].Unmap();
     return false;
   }
@@ -1047,7 +1047,7 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-void CRendererPLBase<TBase>::ReleaseSWBuffer(int index)
+void CLinuxRendererPLBase<TBase>::ReleaseSWBuffer(int index)
 {
   SWBuffer& sw = m_swBuffers[index];
   for (int n = 0; n < static_cast<int>(std::size(sw.tex)); ++n)
@@ -1073,7 +1073,7 @@ void CRendererPLBase<TBase>::ReleaseSWBuffer(int index)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::PlaneDataToGLFormats(const pl_plane_data& pd,
+bool CLinuxRendererPLBase<TBase>::PlaneDataToGLFormats(const pl_plane_data& pd,
                                                   GLenum& iformat, GLenum& format,
                                                   GLenum& type, int& bytesPerPixel)
 {
@@ -1123,7 +1123,7 @@ bool CRendererPLBase<TBase>::PlaneDataToGLFormats(const pl_plane_data& pd,
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
+bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
 {
   auto& buf = this->m_buffers[index];
   SWBuffer& sw = m_swBuffers[index];
@@ -1140,7 +1140,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   if (plbuf.num_planes <= 0)
   {
     CLog::Log(LOGERROR,
-              "CRendererPLBase::UploadSoftware - unsupported pixel format {} (buf reports {})",
+              "CLinuxRendererPLBase::UploadSoftware - unsupported pixel format {} (buf reports {})",
               static_cast<int>(fmt), static_cast<int>(buf.videoBuffer->GetFormat()));
     return false;
   }
@@ -1168,7 +1168,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     if (!PlaneDataToGLFormats(pdata[n], iformat, glFormat, glType, bytesPerPixel))
     {
       CLog::Log(LOGERROR,
-                "CRendererPLBase::UploadSoftware - no GL format mapping for plane {}", n);
+                "CLinuxRendererPLBase::UploadSoftware - no GL format mapping for plane {}", n);
       return false;
     }
 
@@ -1222,7 +1222,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     if (!pboPtr)
     {
       glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - glMapBufferRange failed for plane {}", n);
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadSoftware - glMapBufferRange failed for plane {}", n);
       return false;
     }
 
@@ -1256,7 +1256,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
       if (!plbuf.tex[n])
       {
         CLog::Log(LOGERROR,
-                  "CRendererPLBase::UploadSoftware - pl_opengl_wrap failed for plane {}", n);
+                  "CLinuxRendererPLBase::UploadSoftware - pl_opengl_wrap failed for plane {}", n);
         return false;
       }
     }
@@ -1294,7 +1294,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CRendererPLBase<TBase>::RenderHook(int idx)
+bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
 {
   PLBuffer& plbuf = m_plBuffers[idx];
   if (!plbuf.loaded) [[unlikely]]
@@ -1362,7 +1362,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     m_cachedFboTex = pl_opengl_wrap(gpu, &wrapParams);
     if (!m_cachedFboTex)
     {
-      CLog::Log(LOGERROR, "CRendererPLBase::RenderHook - failed to wrap GL framebuffer");
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::RenderHook - failed to wrap GL framebuffer");
       m_cachedFboId = UINT_MAX;
       return false;
     }
@@ -1491,18 +1491,18 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     if (status == PL_QUEUE_OK || status == PL_QUEUE_MORE) [[likely]]
     {
       if (!pl_render_image_mix(renderer, &mix, &frameOut, &params))
-        CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_render_image_mix failed");
+        CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_render_image_mix failed");
       rendered = true;
     }
     else if (status == PL_QUEUE_ERR) [[unlikely]]
     {
-      CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_queue_update error");
+      CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_queue_update error");
     }
   }
   if (!rendered)
   {
     if (!pl_render_image(renderer, &frameIn, &frameOut, &params))
-      CLog::Log(LOGWARNING, "CRendererPLBase::RenderHook - pl_render_image failed");
+      CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_render_image failed");
   }
 
   // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit.
@@ -1539,7 +1539,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-void CRendererPLBase<TBase>::ReleasePLBuffer(int index)
+void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
 {
   PLBuffer& plbuf = m_plBuffers[index];
 

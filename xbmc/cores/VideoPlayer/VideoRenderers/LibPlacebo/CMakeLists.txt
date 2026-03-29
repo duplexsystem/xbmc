@@ -9,12 +9,12 @@ set(HEADERS
         PLHelper.h)
 
 if(NOT (WIN32 OR WINDOWS_STORE))
-  list(APPEND HEADERS RendererPLBase.h)
-  list(APPEND SOURCES RendererPLGL.cpp)
-  list(APPEND HEADERS RendererPLGL.h)
+  list(APPEND HEADERS LinuxRendererPLBase.h)
+  list(APPEND SOURCES LinuxRendererPLGL.cpp)
+  list(APPEND HEADERS LinuxRendererPLGL.h)
   if(TARGET ${APP_NAME_LC}::OpenGLES)
-    list(APPEND SOURCES RendererPLGLES.cpp)
-    list(APPEND HEADERS RendererPLGLES.h)
+    list(APPEND SOURCES LinuxRendererPLGLES.cpp)
+    list(APPEND HEADERS LinuxRendererPLGLES.h)
   endif()
 endif()
 
