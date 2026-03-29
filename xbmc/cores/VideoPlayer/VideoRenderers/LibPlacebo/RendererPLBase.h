@@ -55,6 +55,7 @@ extern "C"
 }
 
 #include <array>
+#include <cstring>
 
 #include <libplacebo/shaders/icc.h>
 #include <libplacebo/utils/libav.h>
@@ -102,6 +103,19 @@ protected:
   [[nodiscard]] virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
 
 private:
+  // Persistent per-slot GL resources for the software decode upload path.
+  // Kept separate from PLBuffer so they survive across per-frame ReleasePLBuffer
+  // calls (which only destroy the lightweight pl_tex wrappers). Freed in
+  // DeleteTexture and the destructor.
+  struct SWBuffer
+  {
+    GLuint pbo[3]{0, 0, 0};        ///< Pixel Buffer Objects for async CPU→GPU DMA
+    GLuint tex[3]{0, 0, 0};        ///< Target GL_TEXTURE_2D textures
+    int texW[3]{0, 0, 0};          ///< Cached dimensions for resize detection
+    int texH[3]{0, 0, 0};
+    GLenum texIformat[3]{0, 0, 0}; ///< Cached iformat for format-change detection
+  };
+
   struct PLBuffer
   {
     pl_plane planes[3]{};
@@ -127,6 +141,7 @@ private:
   };
 
   std::array<PLBuffer, NUM_BUFFERS> m_plBuffers{};
+  std::array<SWBuffer, NUM_BUFFERS> m_swBuffers{};
   std::array<CDRMPRIMETexture, NUM_BUFFERS> m_drmTextures{};
   bool m_isDRMPRIME{false};
   // True when eglQueryDmaBufModifiersEXT is available: the EGL stack inserts
@@ -276,6 +291,12 @@ private:
   static void DiscardCallback(const struct pl_source_frame* src);
 
   void ReleasePLBuffer(int index);
+  void ReleaseSWBuffer(int index);
+
+  // Map pl_plane_data component layout → GL iformat/format/type/bytesPerPixel.
+  static bool PlaneDataToGLFormats(const pl_plane_data& pd,
+                                   GLenum& iformat, GLenum& format,
+                                   GLenum& type, int& bytesPerPixel);
 };
 
 // =============================================================================
@@ -293,7 +314,10 @@ template<typename TBase>
 CRendererPLBase<TBase>::~CRendererPLBase()
 {
   for (int i = 0; i < NUM_BUFFERS; ++i)
+  {
     ReleasePLBuffer(i);
+    ReleaseSWBuffer(i);
+  }
   if (m_plQueue)
   {
     pl_queue_destroy(&m_plQueue);
@@ -852,6 +876,7 @@ template<typename TBase>
 void CRendererPLBase<TBase>::DeleteTexture(int index)
 {
   ReleasePLBuffer(index);
+  ReleaseSWBuffer(index);
   GLuint dummyTex = this->m_buffers[index].fields[0][0].id; // 0 == FIELD_FULL
   if (dummyTex > 0)
     glDeleteTextures(1, &dummyTex);
@@ -1311,13 +1336,90 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
 }
 
 // ---------------------------------------------------------------------------
-// UploadSoftware — CPU→GPU upload via pl_upload_plane
+// ReleaseSWBuffer — frees the persistent PBOs and GL textures for one slot
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CRendererPLBase<TBase>::ReleaseSWBuffer(int index)
+{
+  SWBuffer& sw = m_swBuffers[index];
+  for (int n = 0; n < static_cast<int>(std::size(sw.tex)); ++n)
+  {
+    if (sw.pbo[n])
+    {
+      glDeleteBuffers(1, &sw.pbo[n]);
+      sw.pbo[n] = 0;
+    }
+    if (sw.tex[n])
+    {
+      glDeleteTextures(1, &sw.tex[n]);
+      sw.tex[n] = 0;
+    }
+    sw.texW[n] = 0;
+    sw.texH[n] = 0;
+    sw.texIformat[n] = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PlaneDataToGLFormats — map pl_plane_data layout to GL format/type/iformat
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CRendererPLBase<TBase>::PlaneDataToGLFormats(const pl_plane_data& pd,
+                                                  GLenum& iformat, GLenum& format,
+                                                  GLenum& type, int& bytesPerPixel)
+{
+  int numComp = 0;
+  for (int c = 0; c < 4; ++c)
+    if (pd.component_size[c] > 0)
+      ++numComp;
+  if (numComp == 0)
+    return false;
+
+  bytesPerPixel = static_cast<int>(pd.pixel_stride);
+  const bool wide = (bytesPerPixel > numComp); // >1 byte per component: 16-bit container
+
+  switch (numComp)
+  {
+    case 1:
+      iformat = wide ? GL_R16 : GL_R8;
+      format = GL_RED;
+      type = wide ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+      return true;
+    case 2:
+      iformat = wide ? GL_RG16 : GL_RG8;
+      format = GL_RG;
+      type = wide ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+      return true;
+    case 4:
+      iformat = wide ? GL_RGBA16 : GL_RGBA8;
+      format = GL_RGBA;
+      type = wide ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UploadSoftware — async CPU-to-GPU upload via PBO + pl_opengl_wrap
+//
+// Replaces synchronous pl_upload_plane with a PBO pipeline:
+//   1. Orphan PBO each frame  ->  no CPU/GPU sync stall
+//   2. memcpy frame data into the mapped PBO (CPU-side write)
+//   3. glTexSubImage2D with PBO bound  ->  driver schedules async DMA
+//   4. pl_opengl_wrap wraps the persistent GL texture for libplacebo
+//
+// The GL textures (m_swBuffers) survive ReleasePLBuffer; only the lightweight
+// pl_opengl_wrap descriptor (plbuf.tex[n]) is recreated each frame.
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
 bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
 {
   auto& buf = this->m_buffers[index];
+  SWBuffer& sw = m_swBuffers[index];
 
   uint8_t* src[3]{};
   int srcStrides[3]{};
@@ -1336,35 +1438,122 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     return false;
   }
 
-  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
-
-  // Use the AVPixFmtDescriptor (m_format is AVPixelFormat, set from videoBuffer->GetFormat())
-  // to derive the correct per-plane chroma shifts.  This handles 4:2:0, 4:2:2, and 4:4:4
-  // without hardcoding.  Fall back to shift=1 (4:2:0) if the descriptor is unavailable.
-  //
-  // NOTE: Do NOT use AV_CEIL_RSHIFT(a, b) with a runtime b.  When b is not a compile-time
-  // constant, the macro takes the path -(-(a) >> b) which is implementation-defined for
-  // signed integers and can produce wrong results.  Use the explicit ceiling formula instead.
+  // Derive chroma plane dimensions. Do NOT use AV_CEIL_RSHIFT(a, b) with a
+  // runtime b -- the macro is implementation-defined for signed integers when b
+  // is not a compile-time constant. Use the explicit ceiling-shift formula.
   const AVPixFmtDescriptor* fmtDesc = av_pix_fmt_desc_get(fmt);
   const int chromaShiftW = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_w) : 1;
   const int chromaShiftH = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_h) : 1;
 
+  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
-    pdata[n].pixels = src[n];
-    pdata[n].row_stride = srcStrides[n];
-    pdata[n].width = (n > 0) ? (this->m_sourceWidth + (1 << chromaShiftW) - 1) >> chromaShiftW
-                             : this->m_sourceWidth;
-    pdata[n].height = (n > 0) ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
-                              : this->m_sourceHeight;
+    const int planeW = (n > 0)
+        ? (this->m_sourceWidth  + (1 << chromaShiftW) - 1) >> chromaShiftW
+        : this->m_sourceWidth;
+    const int planeH = (n > 0)
+        ? (this->m_sourceHeight + (1 << chromaShiftH) - 1) >> chromaShiftH
+        : this->m_sourceHeight;
 
-    if (!pl_upload_plane(gpu, &plbuf.planes[n], &plbuf.tex[n], &pdata[n]))
+    GLenum iformat, glFormat, glType;
+    int bytesPerPixel;
+    if (!PlaneDataToGLFormats(pdata[n], iformat, glFormat, glType, bytesPerPixel))
     {
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - pl_upload_plane failed for plane {}",
-                n);
+      CLog::Log(LOGERROR,
+                "CRendererPLBase::UploadSoftware - no GL format mapping for plane {}", n);
       return false;
     }
 
+    // Reallocate the GL texture only when dimensions or format change.
+    if (sw.tex[n] == 0 || sw.texW[n] != planeW || sw.texH[n] != planeH ||
+        sw.texIformat[n] != iformat)
+    {
+      // The underlying GL texture is being reallocated; the old pl_tex wrapper
+      // would hold a stale texture ID, so invalidate it now.
+      if (plbuf.tex[n])
+      {
+        pl_tex_destroy(gpu, &plbuf.tex[n]);
+        plbuf.tex[n] = nullptr;
+      }
+
+      if (sw.tex[n] == 0)
+        glGenTextures(1, &sw.tex[n]);
+      glBindTexture(GL_TEXTURE_2D, sw.tex[n]);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(iformat),
+                   planeW, planeH, 0, glFormat, glType, nullptr);
+      glBindTexture(GL_TEXTURE_2D, 0);
+
+      sw.texW[n] = planeW;
+      sw.texH[n] = planeH;
+      sw.texIformat[n] = iformat;
+    }
+
+    // Orphan the PBO each frame (glBufferData with nullptr discards the old
+    // allocation). The driver can then issue the DMA transfer for the previous
+    // frame and satisfy this mapping at the same time without a CPU stall.
+    if (sw.pbo[n] == 0)
+      glGenBuffers(1, &sw.pbo[n]);
+
+    const GLsizeiptr pboSize = static_cast<GLsizeiptr>(srcStrides[n]) * planeH;
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, sw.pbo[n]);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, pboSize, nullptr, GL_STREAM_DRAW);
+    void* pboPtr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    if (!pboPtr)
+    {
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - glMapBuffer failed for plane {}", n);
+      return false;
+    }
+
+    std::memcpy(pboPtr, src[n], static_cast<size_t>(srcStrides[n]) * planeH);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+    // With a PBO bound, glTexSubImage2D reads from the PBO's GPU address space
+    // (nullptr = offset 0 into the PBO) rather than CPU memory. The driver can
+    // schedule this DMA transfer asynchronously.
+    const GLint rowLengthPixels = srcStrides[n] / bytesPerPixel;
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLengthPixels);
+    glBindTexture(GL_TEXTURE_2D, sw.tex[n]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, planeW, planeH, glFormat, glType, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    // Wrap the persistent GL texture for libplacebo. pl_opengl_wrap allocates
+    // only a small descriptor struct -- no GL calls. pl_tex_destroy (called in
+    // ReleasePLBuffer) releases the wrapper without deleting the GL texture
+    // because libplacebo honours the "external owner" contract for wrapped textures.
+    if (!plbuf.tex[n])
+    {
+      pl_opengl_wrap_params wp{};
+      wp.texture = sw.tex[n];
+      wp.target = GL_TEXTURE_2D;
+      wp.iformat = static_cast<int>(iformat);
+      wp.width = planeW;
+      wp.height = planeH;
+      plbuf.tex[n] = pl_opengl_wrap(gpu, &wp);
+      if (!plbuf.tex[n])
+      {
+        CLog::Log(LOGERROR,
+                  "CRendererPLBase::UploadSoftware - pl_opengl_wrap failed for plane {}", n);
+        return false;
+      }
+    }
+
+    // Build the pl_plane descriptor using pl_plane_data's component mapping.
+    plbuf.planes[n] = {};
+    plbuf.planes[n].texture = plbuf.tex[n];
+    for (int c = 0; c < 4; ++c)
+    {
+      if (pdata[n].component_size[c] > 0)
+        plbuf.planes[n].component_mapping[plbuf.planes[n].components++] =
+            static_cast<pl_channel>(pdata[n].component_map[c]);
+    }
     // OpenGL's coordinate system is bottom-up; top-down memory uploads are inverted.
     plbuf.planes[n].flipped = true;
   }
@@ -1378,7 +1567,6 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   plbuf.colorRepr.bits = bits;
 
   ApplyHdrMetadata(plbuf, buf);
-
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
   buf.loaded = true;
