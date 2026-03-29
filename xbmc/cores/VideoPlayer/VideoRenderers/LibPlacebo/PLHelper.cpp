@@ -8,6 +8,10 @@
 
 #include "PLHelper.h"
 
+#include "ServiceBroker.h"
+#include "filesystem/File.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
 #include "utils/log.h"
 
 #if defined(HAS_DX)
@@ -392,5 +396,238 @@ const pl_tone_map_function* PL::PLInstance::GetToneMappingFunction(pl_tone_mappi
       return &pl_tone_map_st2094_10;
     default:
       return nullptr;
+  }
+}
+
+const char* PL::KodiScalingToPlacebo(ESCALINGMETHOD method)
+{
+  switch (method)
+  {
+    case VS_SCALINGMETHOD_NEAREST:
+      return "nearest";
+    case VS_SCALINGMETHOD_LINEAR:
+      return "bilinear";
+    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
+      return "bicubic";
+    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
+      return "mitchell";
+    case VS_SCALINGMETHOD_CUBIC_CATMULL:
+      return "catmull_rom";
+    case VS_SCALINGMETHOD_LANCZOS2:
+    case VS_SCALINGMETHOD_LANCZOS3_FAST:
+    case VS_SCALINGMETHOD_LANCZOS3:
+      return "lanczos";
+    case VS_SCALINGMETHOD_SPLINE36_FAST:
+    case VS_SCALINGMETHOD_SPLINE36:
+      return "spline36";
+    default:
+      return nullptr;
+  }
+}
+
+PL::RenderConfig::RenderConfig()
+{
+  m_plOpts = pl_options_alloc(PL::PLInstance::Get()->m_plLog);
+  m_plCmsManager = std::make_unique<CColorManager>();
+}
+
+PL::RenderConfig::~RenderConfig()
+{
+  pl_icc_close(&m_iccObject);
+  pl_options_free(&m_plOpts);
+}
+
+void PL::RenderConfig::ResetCmsState()
+{
+  m_plCmsToken = -1;
+  m_cmsLutValid = false;
+  pl_icc_close(&m_iccObject);
+  m_iccPath.clear();
+  m_iccData.clear();
+  m_iccSignature = 0;
+}
+
+void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings)
+{
+  pl_options_reset(m_plOpts, nullptr);
+
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+
+  {
+    static constexpr const char* kPresets[] = {"fast", "default", "high_quality"};
+    const int preset = settings->GetInt(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PRESET);
+    if (preset >= 0 && preset < static_cast<int>(std::size(kPresets)))
+      pl_options_set_str(m_plOpts, "preset", kPresets[preset]);
+  }
+
+  pl_options_set_str(m_plOpts, "deband",
+                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND) ? "yes" : "no");
+  pl_options_set_str(m_plOpts, "peak_detect",
+                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT) ? "yes" : "no");
+  if (settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
+    pl_options_set_str(m_plOpts, "frame_mixer", "oversample");
+
+  if (const char* filter = PL::KodiScalingToPlacebo(scalingMethod))
+  {
+    pl_options_set_str(m_plOpts, "upscaler", filter);
+    pl_options_set_str(m_plOpts, "downscaler", filter);
+  }
+
+  static constexpr const char* kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
+  if (videoSettings.m_ToneMapMethod > 0 && videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
+    pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[videoSettings.m_ToneMapMethod]);
+
+  pl_options_set_str(m_plOpts, "dither",
+                     settings->GetBool(CSettings::SETTING_VIDEOSCREEN_DITHER) ? "yes" : "no");
+
+  switch (videoSettings.m_InterlaceMethod)
+  {
+    case VS_INTERLACEMETHOD_NONE:
+      pl_options_set_str(m_plOpts, "deinterlace", "no");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_BOB:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "bob");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_YADIF:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "yadif");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_BWDIF:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "bwdif");
+      break;
+    default:
+      break;
+  }
+
+  {
+    const float brightness = (videoSettings.m_Brightness - 50.0f) / 50.0f;
+    const float contrast = videoSettings.m_Contrast / 50.0f;
+    if (brightness != 0.0f || contrast != 1.0f)
+    {
+      m_plOpts->color_adjustment.brightness = brightness;
+      m_plOpts->color_adjustment.contrast = contrast;
+      m_plOpts->params.color_adjustment = &m_plOpts->color_adjustment;
+    }
+  }
+}
+
+void PL::RenderConfig::UpdateCmsLut(AVColorPrimaries srcPrimaries)
+{
+  if (!m_plCmsManager->IsEnabled() || !m_plCmsManager->IsValid())
+  {
+    m_cmsLutValid = false;
+    return;
+  }
+
+  if (m_plCmsManager->CheckConfiguration(m_plCmsToken, srcPrimaries))
+    return;
+
+  int clutSize = 0;
+  int dataSize = 0;
+  if (!CColorManager::Get3dLutSize(CMS_DATA_FMT_RGB, &clutSize, &dataSize))
+  {
+    CLog::Log(LOGERROR, "PL::RenderConfig::UpdateCmsLut - Get3dLutSize failed");
+    m_cmsLutValid = false;
+    return;
+  }
+
+  std::vector<uint16_t> rawData(dataSize / sizeof(uint16_t));
+  if (!m_plCmsManager->GetVideo3dLut(srcPrimaries, &m_plCmsToken, CMS_DATA_FMT_RGB,
+                                     clutSize, rawData.data()))
+  {
+    CLog::Log(LOGERROR, "PL::RenderConfig::UpdateCmsLut - GetVideo3dLut failed");
+    m_cmsLutValid = false;
+    return;
+  }
+
+  m_cmsLutData.resize(rawData.size());
+  constexpr float kScale = 1.0f / 65535.0f;
+  for (size_t i = 0; i < rawData.size(); ++i)
+    m_cmsLutData[i] = static_cast<float>(rawData[i]) * kScale;
+
+  m_cmsLut = pl_custom_lut{};
+  m_cmsLut.size[0] = clutSize;
+  m_cmsLut.size[1] = clutSize;
+  m_cmsLut.size[2] = clutSize;
+  m_cmsLut.data = m_cmsLutData.data();
+  m_cmsLut.signature = static_cast<uint64_t>(static_cast<unsigned int>(m_plCmsToken));
+
+  m_cmsLutValid = true;
+  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateCmsLut - loaded {}³ CMS LUT (token {})", clutSize, m_plCmsToken);
+}
+
+void PL::RenderConfig::UpdateIccProfile()
+{
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const std::string path = settings->GetString(CSettings::SETTING_VIDEOSCREEN_DISPLAYPROFILE);
+
+  if (path == m_iccPath)
+    return;
+
+  m_iccData.clear();
+  m_iccPath.clear();
+  m_iccSignature = 0;
+
+  if (path.empty())
+    return;
+
+  XFILE::CFile f;
+  if (!f.Open(path))
+  {
+    CLog::Log(LOGERROR, "PL::RenderConfig::UpdateIccProfile - cannot open ICC file: {}", path);
+    return;
+  }
+
+  const int64_t size = f.GetLength();
+  if (size <= 0)
+  {
+    CLog::Log(LOGERROR, "PL::RenderConfig::UpdateIccProfile - empty ICC file: {}", path);
+    f.Close();
+    return;
+  }
+
+  m_iccData.resize(static_cast<size_t>(size));
+  f.Read(m_iccData.data(), size);
+  f.Close();
+
+  pl_icc_profile iccProf{};
+  iccProf.data = m_iccData.data();
+  iccProf.len = m_iccData.size();
+  pl_icc_profile_compute_signature(&iccProf);
+  m_iccSignature = iccProf.signature;
+
+  if (!pl_icc_update(PL::PLInstance::Get()->m_plLog, &m_iccObject, &iccProf, nullptr))
+  {
+    CLog::Log(LOGERROR, "PL::RenderConfig::UpdateIccProfile - pl_icc_update failed: {}", path);
+    m_iccData.clear();
+    m_iccSignature = 0;
+    return;
+  }
+
+  m_iccPath = path;
+  CLog::Log(LOGDEBUG, "PL::RenderConfig::UpdateIccProfile - opened ICC profile ({} bytes): {}", size, path);
+}
+
+void PL::RenderConfig::ApplyCMS(pl_frame& frameOut, AVColorPrimaries srcPrimaries)
+{
+  const auto cmsSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const bool cmsEnabled = cmsSettings->GetBool("videoscreen.cmsenabled");
+  const int cmsMode = cmsSettings->GetInt("videoscreen.cmsmode");
+  if (cmsEnabled && cmsMode == CMS_MODE_PROFILE)
+  {
+    UpdateIccProfile();
+    if (m_iccObject)
+      frameOut.icc = m_iccObject;
+  }
+  else
+  {
+    UpdateCmsLut(srcPrimaries);
+    if (m_cmsLutValid)
+    {
+      frameOut.lut = &m_cmsLut;
+      frameOut.lut_type = PL_LUT_NATIVE;
+    }
   }
 }

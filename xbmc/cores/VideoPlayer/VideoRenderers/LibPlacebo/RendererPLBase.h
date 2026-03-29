@@ -161,7 +161,7 @@ private:
   AVPixelFormat m_format{AV_PIX_FMT_NONE};
   pl_color_space m_colorSpace{};
   pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
-  pl_options m_plOpts{nullptr}; ///< Owns all libplacebo render parameters
+  std::unique_ptr<PL::RenderConfig> m_plConfig;
 
   struct QueuedFrameState
   {
@@ -209,28 +209,7 @@ private:
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
 
-  // CMS — works on both GL and GLES.
-  // m_plCmsManager is our own CColorManager instance (independent of any base-class
-  // manager) so CMS functions identically regardless of TBase.
-  //
-  // Two CMS paths are supported:
-  //  • CMS_MODE_PROFILE: ICC file is opened into m_iccObject via pl_icc_update and
-  //    set on frameOut.icc directly, bypassing the deprecated icc_fallback path.
-  //  • CMS_MODE_3DLUT: CColorManager generates a float CLUT that is attached
-  //    to frameOut.lut (PL_LUT_NATIVE) as a display-calibration LUT.
-  std::unique_ptr<CColorManager> m_plCmsManager;
 
-  // ICC profile state (CMS_MODE_PROFILE path)
-  pl_icc_object m_iccObject{nullptr}; ///< Parsed ICC object managed by pl_icc_update
-  std::vector<uint8_t> m_iccData; ///< Raw ICC file bytes (kept until pl_icc_update succeeds)
-  std::string m_iccPath; ///< Path last successfully opened into m_iccObject
-  uint64_t m_iccSignature{0}; ///< Precomputed hash for pl_icc_update signature
-
-  // 3D LUT state (CMS_MODE_3DLUT path)
-  std::vector<float> m_cmsLutData; ///< Float-normalised CLUT samples
-  pl_custom_lut m_cmsLut{}; ///< References m_cmsLutData.data()
-  int m_plCmsToken{-1}; ///< Last token from CheckConfiguration; -1 = never loaded
-  bool m_cmsLutValid{false};
 
   // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
   //
@@ -254,35 +233,13 @@ private:
   FnGlWaitSemaphoreEXT m_glWaitSemaphoreEXT{nullptr};
   bool m_hasGLSemaphoreFd{false};
 
-  static void ApplyHdrMetadata(PLBuffer& pb, const auto& b);
 
-  // Reloads the CMS 3D LUT from CColorManager when the token changes.
-  void UpdateCmsLut();
-  // Opens/updates m_iccObject via pl_icc_update when the ICC path changes.
-  void UpdateIccProfile();
-
-  // Maps a Kodi ESCALINGMETHOD to the corresponding libplacebo filter preset
-  // name string, or nullptr when the method has no direct equivalent.
-  static const char* KodiScalingToPlacebo(ESCALINGMETHOD method);
 
   bool UploadVAAPI(int index, PLBuffer& plbuf);
   bool UploadDRMPRIME(int index, PLBuffer& plbuf);
   bool UploadSoftware(int index, PLBuffer& plbuf);
 
-  static constexpr pl_rotation RotationFromOrientation(unsigned int deg)
-  {
-    switch (deg)
-    {
-      case 90:
-        return PL_ROTATION_270;
-      case 180:
-        return PL_ROTATION_180;
-      case 270:
-        return PL_ROTATION_90;
-      default:
-        return PL_ROTATION_0;
-    }
-  }
+
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -307,8 +264,7 @@ private:
 template<typename TBase>
 CRendererPLBase<TBase>::CRendererPLBase()
 {
-  m_plOpts = pl_options_alloc(PL::PLInstance::Get()->m_plLog);
-  m_plCmsManager = std::make_unique<CColorManager>();
+  m_plConfig = std::make_unique<PL::RenderConfig>();
 }
 
 template<typename TBase>
@@ -329,8 +285,7 @@ CRendererPLBase<TBase>::~CRendererPLBase()
     pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
-  pl_icc_close(&m_iccObject);
-  pl_options_free(&m_plOpts);
+  m_plConfig.reset();
   PL::PLInstance::Get()->Reset();
 }
 
@@ -391,12 +346,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
   // Invalidate CMS state: source primaries may have changed and we are about
   // to render a new video source.
-  m_plCmsToken = -1;
-  m_cmsLutValid = false;
-  pl_icc_close(&m_iccObject);
-  m_iccPath.clear();
-  m_iccData.clear();
-  m_iccSignature = 0;
+  m_plConfig->ResetCmsState();
 
   // Flush libplacebo's renderer caches (peak detection, frame mix state) so
   // the new source starts clean.  Required when switching content.
@@ -543,8 +493,7 @@ bool CRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   out->color = plbuf.colorSpace;
   out->repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(out, r->m_chromaLocation);
-
-  out->rotation = CRendererPLBase<TBase>::RotationFromOrientation(r->m_renderOrientation);
+  out->rotation = PL::RotationFromOrientation(r->m_renderOrientation);
 
   // pl_queue sets out->field after map() returns based on first_field splitting.
   out->field = PL_FIELD_NONE;
@@ -636,83 +585,7 @@ template<typename TBase>
 void CRendererPLBase<TBase>::UpdateVideoFilter()
 {
   TBase::UpdateVideoFilter();
-  pl_options_reset(m_plOpts, nullptr);
-
-  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-
-  // Render quality preset — applied first as the baseline; all settings below override
-  // specific params on top of it. 0=fast, 1=default, 2=high_quality.
-  {
-    static constexpr const char* kPresets[] = {"fast", "default", "high_quality"};
-    const int preset = settings->GetInt(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PRESET);
-    if (preset >= 0 && preset < static_cast<int>(std::size(kPresets)))
-      pl_options_set_str(m_plOpts, "preset", kPresets[preset]);
-  }
-
-  // Global libplacebo render quality settings (Settings > Player > Videos > Processing)
-  pl_options_set_str(m_plOpts, "deband",
-                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND) ? "yes"
-                                                                                         : "no");
-  pl_options_set_str(m_plOpts, "peak_detect",
-                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT)
-                         ? "yes"
-                         : "no");
-  if (settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
-    pl_options_set_str(m_plOpts, "frame_mixer", "oversample");
-
-  // Scaling — map the user-visible Video Settings selector to libplacebo filter.
-  if (const char* filter = KodiScalingToPlacebo(this->m_scalingMethod))
-  {
-    pl_options_set_str(m_plOpts, "upscaler", filter);
-    pl_options_set_str(m_plOpts, "downscaler", filter);
-  }
-
-  // Tone mapping — Kodi Video Settings selector.
-  static constexpr const char* kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
-  if (this->m_videoSettings.m_ToneMapMethod > 0 &&
-      this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
-    pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
-
-  // Dithering — on/off from Kodi Video Settings.
-  pl_options_set_str(m_plOpts, "dither",
-                     settings->GetBool(CSettings::SETTING_VIDEOSCREEN_DITHER) ? "yes" : "no");
-
-  // Deinterlacing — driven by Kodi Video Settings interlace method selector.
-  switch (this->m_videoSettings.m_InterlaceMethod)
-  {
-    case VS_INTERLACEMETHOD_NONE:
-      pl_options_set_str(m_plOpts, "deinterlace", "no");
-      break;
-    case VS_INTERLACEMETHOD_LIBPLACEBO_BOB:
-      pl_options_set_str(m_plOpts, "deinterlace", "yes");
-      pl_options_set_str(m_plOpts, "deinterlace_algo", "bob");
-      break;
-    case VS_INTERLACEMETHOD_LIBPLACEBO_YADIF:
-      pl_options_set_str(m_plOpts, "deinterlace", "yes");
-      pl_options_set_str(m_plOpts, "deinterlace_algo", "yadif");
-      break;
-    case VS_INTERLACEMETHOD_LIBPLACEBO_BWDIF:
-      pl_options_set_str(m_plOpts, "deinterlace", "yes");
-      pl_options_set_str(m_plOpts, "deinterlace_algo", "bwdif");
-      break;
-    default:
-      // NONE/AUTO: libplacebo default (deinterlace disabled, enabled per-frame
-      // if the frame carries interlace flags via pl_queue).
-      break;
-  }
-
-  // Brightness / Contrast — map Kodi's 0–100 scale (neutral = 50) to libplacebo
-  // pl_color_adjustment: brightness [-1, 1] (neutral 0), contrast [0, 2] (neutral 1).
-  {
-    const float brightness = (this->m_videoSettings.m_Brightness - 50.0f) / 50.0f;
-    const float contrast = this->m_videoSettings.m_Contrast / 50.0f;
-    if (brightness != 0.0f || contrast != 1.0f)
-    {
-      m_plOpts->color_adjustment.brightness = brightness;
-      m_plOpts->color_adjustment.contrast = contrast;
-      m_plOpts->params.color_adjustment = &m_plOpts->color_adjustment;
-    }
-  }
+  m_plConfig->UpdateVideoFilter(this->m_scalingMethod, this->m_videoSettings);
 }
 
 template<typename TBase>
@@ -731,155 +604,7 @@ bool CRendererPLBase<TBase>::LoadShadersHook()
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// KodiScalingToPlacebo — map ESCALINGMETHOD to a libplacebo filter preset name
-// ---------------------------------------------------------------------------
 
-template<typename TBase>
-const char* CRendererPLBase<TBase>::KodiScalingToPlacebo(ESCALINGMETHOD method)
-{
-  switch (method)
-  {
-    case VS_SCALINGMETHOD_NEAREST:
-      return "nearest";
-    case VS_SCALINGMETHOD_LINEAR:
-      return "bilinear";
-    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
-      return "bicubic";
-    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
-      return "mitchell";
-    case VS_SCALINGMETHOD_CUBIC_CATMULL:
-      return "catmull_rom";
-    case VS_SCALINGMETHOD_LANCZOS2:
-    case VS_SCALINGMETHOD_LANCZOS3_FAST:
-    case VS_SCALINGMETHOD_LANCZOS3:
-      return "lanczos";
-    case VS_SCALINGMETHOD_SPLINE36_FAST:
-    case VS_SCALINGMETHOD_SPLINE36:
-      return "spline36";
-    default:
-      return nullptr;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// UpdateCmsLut — reload the 3D LUT from CColorManager when settings change
-// ---------------------------------------------------------------------------
-
-template<typename TBase>
-void CRendererPLBase<TBase>::UpdateCmsLut()
-{
-  if (!m_plCmsManager->IsEnabled() || !m_plCmsManager->IsValid())
-  {
-    m_cmsLutValid = false;
-    return;
-  }
-
-  // CheckConfiguration returns true when the token and primaries are still
-  // current — no reload needed.
-  if (m_plCmsManager->CheckConfiguration(m_plCmsToken, this->m_srcPrimaries))
-    return;
-
-  int clutSize = 0;
-  int dataSize = 0;
-  if (!CColorManager::Get3dLutSize(CMS_DATA_FMT_RGB, &clutSize, &dataSize))
-  {
-    CLog::Log(LOGERROR, "CRendererPLBase::UpdateCmsLut - Get3dLutSize failed");
-    m_cmsLutValid = false;
-    return;
-  }
-
-  std::vector<uint16_t> rawData(dataSize / sizeof(uint16_t));
-  if (!m_plCmsManager->GetVideo3dLut(this->m_srcPrimaries, &m_plCmsToken, CMS_DATA_FMT_RGB,
-                                     clutSize, rawData.data()))
-  {
-    CLog::Log(LOGERROR, "CRendererPLBase::UpdateCmsLut - GetVideo3dLut failed");
-    m_cmsLutValid = false;
-    return;
-  }
-
-  // Convert uint16_t [0, 65535] to float [0.0, 1.0].
-  m_cmsLutData.resize(rawData.size());
-  constexpr float kScale = 1.0f / 65535.0f;
-  for (size_t i = 0; i < rawData.size(); ++i)
-    m_cmsLutData[i] = static_cast<float>(rawData[i]) * kScale;
-
-  m_cmsLut = pl_custom_lut{};
-  m_cmsLut.size[0] = clutSize;
-  m_cmsLut.size[1] = clutSize;
-  m_cmsLut.size[2] = clutSize;
-  m_cmsLut.data = m_cmsLutData.data();
-  // Use the CMS token as a signature so libplacebo can detect changes and
-  // invalidate any internal LUT cache/upload state.
-  m_cmsLut.signature = static_cast<uint64_t>(static_cast<unsigned int>(m_plCmsToken));
-
-  m_cmsLutValid = true;
-  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateCmsLut - loaded {}³ CMS LUT (token {})", clutSize,
-            m_plCmsToken);
-}
-
-// ---------------------------------------------------------------------------
-// UpdateIccProfile — open/update m_iccObject when the ICC path changes
-// ---------------------------------------------------------------------------
-
-template<typename TBase>
-void CRendererPLBase<TBase>::UpdateIccProfile()
-{
-  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  const std::string path = settings->GetString(CSettings::SETTING_VIDEOSCREEN_DISPLAYPROFILE);
-
-  if (path == m_iccPath)
-    return; // Nothing changed.
-
-  m_iccData.clear();
-  m_iccPath.clear();
-  m_iccSignature = 0;
-
-  if (path.empty())
-    return;
-
-  XFILE::CFile f;
-  if (!f.Open(path))
-  {
-    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - cannot open ICC file: {}", path);
-    return;
-  }
-
-  const int64_t size = f.GetLength();
-  if (size <= 0)
-  {
-    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - empty ICC file: {}", path);
-    f.Close();
-    return;
-  }
-
-  m_iccData.resize(static_cast<size_t>(size));
-  f.Read(m_iccData.data(), size);
-  f.Close();
-
-  // Compute signature for pl_icc_update's change-detection.
-  pl_icc_profile iccProf{};
-  iccProf.data = m_iccData.data();
-  iccProf.len = m_iccData.size();
-  pl_icc_profile_compute_signature(&iccProf);
-  m_iccSignature = iccProf.signature;
-
-  // Open/update the pl_icc_object via LittleCMS2. Setting frameOut.icc directly
-  // (rather than frameOut.profile) bypasses the deprecated icc_fallback path in
-  // renderer.c and gives us full error visibility on every profile switch.
-  if (!pl_icc_update(PL::PLInstance::Get()->m_plLog, &m_iccObject, &iccProf, nullptr))
-  {
-    CLog::Log(LOGERROR, "CRendererPLBase::UpdateIccProfile - pl_icc_update failed: {}", path);
-    m_iccData.clear();
-    m_iccSignature = 0;
-    // m_iccPath stays empty so the next frame retries.
-    return;
-  }
-
-  m_iccPath = path;
-  CLog::Log(LOGDEBUG, "CRendererPLBase::UpdateIccProfile - opened ICC profile ({} bytes): {}", size,
-            path);
-}
 
 // ---------------------------------------------------------------------------
 // Texture lifecycle
@@ -941,56 +666,7 @@ bool CRendererPLBase<TBase>::UploadTexture(int index)
   return UploadSoftware(index, plbuf);
 }
 
-// ---------------------------------------------------------------------------
-// ApplyHdrMetadata — shared HDR/DoVi metadata for all upload paths
-// ---------------------------------------------------------------------------
 
-template<typename TBase>
-void CRendererPLBase<TBase>::ApplyHdrMetadata(PLBuffer& pb, const auto& b)
-{
-  if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 || b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
-  {
-    pl_hdr_metadata& hdr = pb.colorSpace.hdr;
-    hdr = {};
-    if (b.hasDisplayMetadata)
-    {
-      const auto& m = b.displayMetadata;
-      hdr.prim.red.x = av_q2d(m.display_primaries[0][0]);
-      hdr.prim.red.y = av_q2d(m.display_primaries[0][1]);
-      hdr.prim.green.x = av_q2d(m.display_primaries[1][0]);
-      hdr.prim.green.y = av_q2d(m.display_primaries[1][1]);
-      hdr.prim.blue.x = av_q2d(m.display_primaries[2][0]);
-      hdr.prim.blue.y = av_q2d(m.display_primaries[2][1]);
-      hdr.prim.white.x = av_q2d(m.white_point[0]);
-      hdr.prim.white.y = av_q2d(m.white_point[1]);
-      if (m.has_luminance)
-      {
-        hdr.max_luma = av_q2d(m.max_luminance);
-        hdr.min_luma = av_q2d(m.min_luminance);
-      }
-    }
-    if (b.hasLightMetadata)
-    {
-      hdr.max_cll = b.lightMetadata.MaxCLL;
-      hdr.max_fall = b.lightMetadata.MaxFALL;
-    }
-  }
-  if (!pl_hdr_metadata_equal(&b.plColorSpace.hdr, &pl_hdr_metadata_empty) ||
-      b.plColorRepr.dovi != nullptr)
-  {
-    if (b.plColorRepr.dovi != nullptr)
-    {
-      pb.colorSpace = b.plColorSpace;
-      pb.colorRepr = b.plColorRepr;
-      pb.doviMetadata = b.plDoviMetadata;
-      pb.colorRepr.dovi = &pb.doviMetadata;
-    }
-    else
-    {
-      pl_hdr_metadata_merge(&pb.colorSpace.hdr, &b.plColorSpace.hdr);
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // UploadVAAPI — VAAPI: export surface as DRM PRIME 2 → EGLImage → GL tex → pl_opengl_wrap
@@ -1254,7 +930,7 @@ bool CRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
       break;
   }
 
-  ApplyHdrMetadata(plbuf, buf);
+  PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1325,7 +1001,7 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
   plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
 
-  ApplyHdrMetadata(plbuf, buf);
+  PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
 
   plbuf.iFlags = buf.iFlags;
 
@@ -1606,7 +1282,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
   plbuf.colorRepr.bits = bits;
 
-  ApplyHdrMetadata(plbuf, buf);
+  PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
   buf.loaded = true;
@@ -1637,7 +1313,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
   frameIn.repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 
-  frameIn.rotation = RotationFromOrientation(this->m_renderOrientation);
+  frameIn.rotation = PL::RotationFromOrientation(this->m_renderOrientation);
   frameIn.field = PL_FIELD_NONE;
 
   CRect src, dst, view;
@@ -1733,37 +1409,9 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
       frameOut.color.hdr.max_luma = peakLuminance;
   }
 
-  // CMS — two paths, both GL and GLES:
-  //  • CMS_MODE_PROFILE: frameOut.icc is set from m_iccObject (opened via
-  //    pl_icc_update in UpdateIccProfile). This uses the direct pl_frame.icc API
-  //    rather than the deprecated pl_frame.profile / icc_fallback path.
-  //  • CMS_MODE_3DLUT: CColorManager's pre-sampled CLUT attached as
-  //    frameOut.lut (PL_LUT_NATIVE).
-  {
-    const auto cmsSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
-    const bool cmsEnabled = cmsSettings->GetBool("videoscreen.cmsenabled");
-    const int cmsMode = cmsSettings->GetInt("videoscreen.cmsmode");
-    // For the native ICC path we check settings directly rather than using
-    // m_plCmsManager->IsEnabled(), which internally validates cmslutsize — a
-    // parameter relevant only to the sampled 3D LUT path and not applicable here.
-    if (cmsEnabled && cmsMode == CMS_MODE_PROFILE)
-    {
-      UpdateIccProfile();
-      if (m_iccObject)
-        frameOut.icc = m_iccObject;
-    }
-    else
-    {
-      UpdateCmsLut();
-      if (m_cmsLutValid)
-      {
-        frameOut.lut = &m_cmsLut;
-        frameOut.lut_type = PL_LUT_NATIVE;
-      }
-    }
-  }
+  m_plConfig->ApplyCMS(frameOut, this->m_srcPrimaries);
 
-  pl_render_params params = m_plOpts->params;
+  pl_render_params params = m_plConfig->GetOptions()->params;
   params.border = PL_CLEAR_SKIP;
 
   // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
