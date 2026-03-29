@@ -109,11 +109,12 @@ private:
   // DeleteTexture and the destructor.
   struct SWBuffer
   {
-    GLuint pbo[3]{0, 0, 0};        ///< Pixel Buffer Objects for async CPU→GPU DMA
-    GLuint tex[3]{0, 0, 0};        ///< Target GL_TEXTURE_2D textures
-    int texW[3]{0, 0, 0};          ///< Cached dimensions for resize detection
+    GLuint pbo[3]{0, 0, 0};              ///< Pixel Buffer Objects for async CPU→GPU DMA
+    GLsizeiptr pboSize[3]{0, 0, 0};      ///< Allocated PBO size (bytes) for resize detection
+    GLuint tex[3]{0, 0, 0};              ///< Target GL_TEXTURE_2D textures
+    int texW[3]{0, 0, 0};                ///< Cached dimensions for resize detection
     int texH[3]{0, 0, 0};
-    GLenum texIformat[3]{0, 0, 0}; ///< Cached iformat for format-change detection
+    GLenum texIformat[3]{0, 0, 0};       ///< Cached iformat for format-change detection
   };
 
   struct PLBuffer
@@ -1493,20 +1494,29 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
       sw.texIformat[n] = iformat;
     }
 
-    // Orphan the PBO each frame (glBufferData with nullptr discards the old
-    // allocation). The driver can then issue the DMA transfer for the previous
-    // frame and satisfy this mapping at the same time without a CPU stall.
     if (sw.pbo[n] == 0)
       glGenBuffers(1, &sw.pbo[n]);
 
     const GLsizeiptr pboSize = static_cast<GLsizeiptr>(srcStrides[n]) * planeH;
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, sw.pbo[n]);
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, pboSize, nullptr, GL_STREAM_DRAW);
-    void* pboPtr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+
+    // (Re)allocate the PBO storage when size changes. glBufferData with nullptr
+    // orphans any previous allocation without a CPU stall.
+    if (sw.pboSize[n] != pboSize)
+    {
+      glBufferData(GL_PIXEL_UNPACK_BUFFER, pboSize, nullptr, GL_STREAM_DRAW);
+      sw.pboSize[n] = pboSize;
+    }
+
+    // GL_MAP_INVALIDATE_BUFFER_BIT orphans the current content, avoiding pipeline
+    // stalls if the GPU is still reading from the previous upload. This replaces
+    // the old glBufferData(nullptr) + glMapBuffer pattern and is GLES 3.0 compatible.
+    void* pboPtr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, pboSize,
+                                    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
     if (!pboPtr)
     {
       glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - glMapBuffer failed for plane {}", n);
+      CLog::Log(LOGERROR, "CRendererPLBase::UploadSoftware - glMapBufferRange failed for plane {}", n);
       return false;
     }
 
