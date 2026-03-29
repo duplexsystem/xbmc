@@ -7759,7 +7759,73 @@ msgctxt "#13476"
 msgid "16 bit per channel"
 msgstr ""
 
-#empty strings from id 13477 to 13504
+#. Label for libplacebo render preset selector in Settings > Player > Videos > Processing
+#: system/settings/linux.xml
+msgctxt "#13483"
+msgid "Render Quality Preset"
+msgstr ""
+
+#. Help text for libplacebo render preset selector
+#: system/settings/linux.xml
+msgctxt "#13484"
+msgid "Sets the overall libplacebo render quality. Fast uses minimal processing; Default balances quality and performance; High Quality enables the best upscaling and tone mapping at higher GPU cost."
+msgstr ""
+
+#. Value of setting with label #13483 "Render Quality Preset"
+#: system/settings/linux.xml
+msgctxt "#13485"
+msgid "Fast"
+msgstr ""
+
+#. Value of setting with label #13483 "Render Quality Preset"
+#: system/settings/linux.xml
+msgctxt "#13486"
+msgid "Default"
+msgstr ""
+
+#. Value of setting with label #13483 "Render Quality Preset"
+#: system/settings/linux.xml
+msgctxt "#13487"
+msgid "High Quality"
+msgstr ""
+
+#. Label for libplacebo debanding toggle in Settings > Player > Videos > Processing
+#: system/settings/linux.xml
+msgctxt "#13477"
+msgid "Debanding"
+msgstr ""
+
+#. Help text for libplacebo debanding toggle
+#: system/settings/linux.xml
+msgctxt "#13478"
+msgid "Remove colour banding artifacts from smooth gradients. Recommended for most content."
+msgstr ""
+
+#. Label for libplacebo HDR peak detection toggle in Settings > Player > Videos > Processing
+#: system/settings/linux.xml
+msgctxt "#13479"
+msgid "HDR Peak Detection"
+msgstr ""
+
+#. Help text for libplacebo HDR peak detection toggle
+#: system/settings/linux.xml
+msgctxt "#13480"
+msgid "Dynamically measure peak brightness from HDR content for more accurate tone mapping."
+msgstr ""
+
+#. Label for libplacebo frame interpolation toggle in Settings > Player > Videos > Processing
+#: system/settings/linux.xml
+msgctxt "#13481"
+msgid "Frame Interpolation"
+msgstr ""
+
+#. Help text for libplacebo frame interpolation toggle
+#: system/settings/linux.xml
+msgctxt "#13482"
+msgid "Interpolate frames to smooth motion at the display refresh rate. May increase latency."
+msgstr ""
+
+#empty strings from id 13483 to 13504
 
 #: system/settings/settings.xml
 msgctxt "#13505"
@@ -9634,7 +9700,25 @@ msgctxt "#16336"
 msgid "IMX - Advanced"
 msgstr ""
 
-#empty strings from id 16337 to 16399
+#. Description of OSD video settings for deinterlace method with label #16337
+#: xbmc/video/dialogs/GUIDialogVideoSettings.cpp
+msgctxt "#16337"
+msgid "libplacebo - Bob"
+msgstr ""
+
+#. Description of OSD video settings for deinterlace method with label #16338
+#: xbmc/video/dialogs/GUIDialogVideoSettings.cpp
+msgctxt "#16338"
+msgid "libplacebo - YADIF"
+msgstr ""
+
+#. Description of OSD video settings for deinterlace method with label #16339
+#: xbmc/video/dialogs/GUIDialogVideoSettings.cpp
+msgctxt "#16339"
+msgid "libplacebo - BWDIF"
+msgstr ""
+
+#empty strings from id 16340 to 16399
 
 #: xbmc/video/dialogs/GUIDialogVideoSettings.cpp
 msgctxt "#16400"

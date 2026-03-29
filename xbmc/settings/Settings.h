@@ -138,6 +138,12 @@ public:
   static constexpr auto SETTING_VIDEOPLAYER_CONVERTDOVI = "videoplayer.convertdovi";
   static constexpr auto SETTING_VIDEOPLAYER_ALLOWEDHDRFORMATS = "videoplayer.allowedhdrformats";
   static constexpr auto SETTING_VIDEOPLAYER_DOVIZEROLEVEL5 = "videoplayer.dovizerolevel5";
+  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_PRESET = "videoplayer.libplacebo.preset";
+  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND = "videoplayer.libplacebo.deband";
+  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT =
+      "videoplayer.libplacebo.peakdetect";
+  static constexpr auto SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX =
+      "videoplayer.libplacebo.framemix";
   static constexpr auto SETTING_VIDEOPLAYER_QUEUETIMESIZE = "videoplayer.queuetimesize";
   static constexpr auto SETTING_VIDEOPLAYER_QUEUEDATASIZE = "videoplayer.queuedatasize";
   static constexpr auto SETTING_MYVIDEOS_SELECTACTION = "myvideos.selectaction";

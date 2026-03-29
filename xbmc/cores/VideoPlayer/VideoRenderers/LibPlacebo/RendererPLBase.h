@@ -21,7 +21,6 @@
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
 #include "filesystem/File.h"
-#include "settings/AdvancedSettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/log.h"
@@ -86,6 +85,7 @@ public:
   bool ConfigChanged(const VideoPicture& picture) override;
   [[nodiscard]] bool Supports(ERENDERFEATURE feature) const override;
   [[nodiscard]] bool Supports(ESCALINGMETHOD method) const override;
+  CRenderInfo GetRenderInfo() override;
   void AddVideoPicture(const VideoPicture& picture, int index) override;
   bool Flush(bool saveBuffers) override;
 
@@ -576,6 +576,18 @@ void CRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
+CRenderInfo CRendererPLBase<TBase>::GetRenderInfo()
+{
+  CRenderInfo info = TBase::GetRenderInfo();
+  info.m_deintMethods.push_back(VS_INTERLACEMETHOD_NONE);
+  info.m_deintMethods.push_back(VS_INTERLACEMETHOD_AUTO);
+  info.m_deintMethods.push_back(VS_INTERLACEMETHOD_LIBPLACEBO_BOB);
+  info.m_deintMethods.push_back(VS_INTERLACEMETHOD_LIBPLACEBO_YADIF);
+  info.m_deintMethods.push_back(VS_INTERLACEMETHOD_LIBPLACEBO_BWDIF);
+  return info;
+}
+
+template<typename TBase>
 bool CRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
 {
   switch (feature)
@@ -586,6 +598,8 @@ bool CRendererPLBase<TBase>::Supports(ERENDERFEATURE feature) const
     case RENDERFEATURE_STRETCH:
     case RENDERFEATURE_ROTATION:
     case RENDERFEATURE_TONEMAP:
+    case RENDERFEATURE_BRIGHTNESS:
+    case RENDERFEATURE_CONTRAST:
       return true;
     default:
       return false;
@@ -598,13 +612,16 @@ bool CRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
   switch (method)
   {
     case VS_SCALINGMETHOD_AUTO:
+    case VS_SCALINGMETHOD_NEAREST:
     case VS_SCALINGMETHOD_LINEAR:
+    case VS_SCALINGMETHOD_LANCZOS2:
     case VS_SCALINGMETHOD_LANCZOS3:
     case VS_SCALINGMETHOD_LANCZOS3_FAST:
     case VS_SCALINGMETHOD_SPLINE36:
     case VS_SCALINGMETHOD_SPLINE36_FAST:
     case VS_SCALINGMETHOD_CUBIC_MITCHELL:
     case VS_SCALINGMETHOD_CUBIC_CATMULL:
+    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
       return true;
     default:
       return false;
@@ -612,7 +629,7 @@ bool CRendererPLBase<TBase>::Supports(ESCALINGMETHOD method) const
 }
 
 // ---------------------------------------------------------------------------
-// UpdateVideoFilter — apply advancedsettings.xml to libplacebo render params
+// UpdateVideoFilter — apply Kodi GUI settings to libplacebo render params
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
@@ -621,70 +638,81 @@ void CRendererPLBase<TBase>::UpdateVideoFilter()
   TBase::UpdateVideoFilter();
   pl_options_reset(m_plOpts, nullptr);
 
-  const auto& adv = *CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  auto applyStr = [&](const char* key, const std::string& val)
-  {
-    if (!val.empty())
-      pl_options_set_str(m_plOpts, key, val.c_str());
-  };
 
-  // Scaling — preset first (acts as baseline), then Kodi's scaling method overrides
-  // the upscaler/downscaler so the user-visible Video Settings selector is authoritative.
-  // Fine-grained libplacebo-only controls (frame mixer, antiringing, sigmoid) follow.
-  applyStr("preset", adv.m_libplaceboPreset);
+  // Render quality preset — applied first as the baseline; all settings below override
+  // specific params on top of it. 0=fast, 1=default, 2=high_quality.
+  {
+    static constexpr const char* kPresets[] = {"fast", "default", "high_quality"};
+    const int preset = settings->GetInt(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PRESET);
+    if (preset >= 0 && preset < static_cast<int>(std::size(kPresets)))
+      pl_options_set_str(m_plOpts, "preset", kPresets[preset]);
+  }
+
+  // Global libplacebo render quality settings (Settings > Player > Videos > Processing)
+  pl_options_set_str(m_plOpts, "deband",
+                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_DEBAND) ? "yes"
+                                                                                         : "no");
+  pl_options_set_str(m_plOpts, "peak_detect",
+                     settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT)
+                         ? "yes"
+                         : "no");
+  if (settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
+    pl_options_set_str(m_plOpts, "frame_mixer", "oversample");
+
+  // Scaling — map the user-visible Video Settings selector to libplacebo filter.
   if (const char* filter = KodiScalingToPlacebo(this->m_scalingMethod))
   {
     pl_options_set_str(m_plOpts, "upscaler", filter);
     pl_options_set_str(m_plOpts, "downscaler", filter);
   }
-  applyStr("frame_mixer", adv.m_libplaceboFrameMixer);
-  applyStr("antiringing_strength", adv.m_libplaceboAntiringing);
-  applyStr("sigmoid", adv.m_libplaceboSigmoid);
 
-  // Debanding
-  applyStr("deband", adv.m_libplaceboDeband);
-  applyStr("deband_iterations", adv.m_libplaceboDebandIterations);
-  applyStr("deband_threshold", adv.m_libplaceboDebandThreshold);
-  applyStr("deband_radius", adv.m_libplaceboDebandRadius);
-  applyStr("deband_grain", adv.m_libplaceboDebandGrain);
-
-  // Peak detection
-  applyStr("peak_detect", adv.m_libplaceboPeakDetect);
-  applyStr("smoothing_period", adv.m_libplaceboSmoothingPeriod);
-  applyStr("scene_threshold_low", adv.m_libplaceboSceneThresholdLow);
-  applyStr("scene_threshold_high", adv.m_libplaceboSceneThresholdHigh);
-  applyStr("peak_percentile", adv.m_libplaceboPeakPercentile);
-
-  // Tone and gamut mapping
-  applyStr("tone_mapping", adv.m_libplaceboToneMapping);
-  applyStr("tone_mapping_param", adv.m_libplaceboToneMappingParam);
-  applyStr("gamut_mapping", adv.m_libplaceboGamutMapping);
-  applyStr("gamut_expansion", adv.m_libplaceboGamutExpansion);
-
-  // Per-video tone mapping override (Kodi setting takes precedence over global)
+  // Tone mapping — Kodi Video Settings selector.
   static constexpr const char* kToneMaps[] = {nullptr, "reinhard", "spline", "hable"};
   if (this->m_videoSettings.m_ToneMapMethod > 0 &&
       this->m_videoSettings.m_ToneMapMethod < VS_TONEMAPMETHOD_MAX)
     pl_options_set_str(m_plOpts, "tone_mapping", kToneMaps[this->m_videoSettings.m_ToneMapMethod]);
 
-  // Dithering — on/off from Kodi's Video Settings (applies to both GL and GLES).
-  // Method and LUT size have no Kodi UI equivalent so they remain advancedsettings.
+  // Dithering — on/off from Kodi Video Settings.
   pl_options_set_str(m_plOpts, "dither",
                      settings->GetBool(CSettings::SETTING_VIDEOSCREEN_DITHER) ? "yes" : "no");
-  applyStr("dither_method", adv.m_libplaceboDitherMethod);
-  applyStr("dither_lut_size", adv.m_libplaceboDitherLutSize);
 
-  // Deinterlacing
-  applyStr("deinterlace", adv.m_libplaceboDeinterlace);
-  applyStr("deinterlace_algo", adv.m_libplaceboDeinterlaceAlgo);
+  // Deinterlacing — driven by Kodi Video Settings interlace method selector.
+  switch (this->m_videoSettings.m_InterlaceMethod)
+  {
+    case VS_INTERLACEMETHOD_NONE:
+      pl_options_set_str(m_plOpts, "deinterlace", "no");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_BOB:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "bob");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_YADIF:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "yadif");
+      break;
+    case VS_INTERLACEMETHOD_LIBPLACEBO_BWDIF:
+      pl_options_set_str(m_plOpts, "deinterlace", "yes");
+      pl_options_set_str(m_plOpts, "deinterlace_algo", "bwdif");
+      break;
+    default:
+      // NONE/AUTO: libplacebo default (deinterlace disabled, enabled per-frame
+      // if the frame carries interlace flags via pl_queue).
+      break;
+  }
 
-  // Misc
-  applyStr("skip_anti_aliasing", adv.m_libplaceboSkipAntiAliasing);
-  applyStr("disable_linear", adv.m_libplaceboDisableLinear);
-  applyStr("disable_builtin_scalers", adv.m_libplaceboDisableBuiltinScalers);
-  applyStr("force_dither", adv.m_libplaceboForceDither);
-  applyStr("disable_fbos", adv.m_libplaceboDisableFbos);
+  // Brightness / Contrast — map Kodi's 0–100 scale (neutral = 50) to libplacebo
+  // pl_color_adjustment: brightness [-1, 1] (neutral 0), contrast [0, 2] (neutral 1).
+  {
+    const float brightness = (this->m_videoSettings.m_Brightness - 50.0f) / 50.0f;
+    const float contrast = this->m_videoSettings.m_Contrast / 50.0f;
+    if (brightness != 0.0f || contrast != 1.0f)
+    {
+      m_plOpts->color_adjustment.brightness = brightness;
+      m_plOpts->color_adjustment.contrast = contrast;
+      m_plOpts->params.color_adjustment = &m_plOpts->color_adjustment;
+    }
+  }
 }
 
 template<typename TBase>
@@ -716,6 +744,8 @@ const char* CRendererPLBase<TBase>::KodiScalingToPlacebo(ESCALINGMETHOD method)
       return "nearest";
     case VS_SCALINGMETHOD_LINEAR:
       return "bilinear";
+    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
+      return "bicubic";
     case VS_SCALINGMETHOD_CUBIC_MITCHELL:
       return "mitchell";
     case VS_SCALINGMETHOD_CUBIC_CATMULL:
