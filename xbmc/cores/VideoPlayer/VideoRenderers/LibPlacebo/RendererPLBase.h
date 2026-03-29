@@ -351,7 +351,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(picture.videoBuffer) != nullptr);
   if (m_isDRMPRIME)
   {
-    EGLDisplay eglDpy = GetDRMPRIMEEGLDisplay();
+    const EGLDisplay eglDpy = GetDRMPRIMEEGLDisplay();
     for (auto& dt : m_drmTextures)
       dt.Init(eglDpy);
   }
@@ -375,7 +375,7 @@ bool CRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
   // Flush libplacebo's renderer caches (peak detection, frame mix state) so
   // the new source starts clean.  Required when switching content.
-  if (auto inst = PL::PLInstance::Get())
+  if (const auto inst = PL::PLInstance::Get())
     pl_renderer_flush_cache(inst->GetRenderer());
 
   // Invalidate per-session render caches: the FBO or window size may have changed
@@ -1227,9 +1227,9 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
     return false;
   }
 
-  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
   GLuint glTex = m_drmTextures[index].GetTexture();
-  CSizeInt sz = m_drmTextures[index].GetTextureSize();
+  const CSizeInt sz = m_drmTextures[index].GetTextureSize();
 
   pl_opengl_wrap_params wp{};
   wp.texture = glTex;
@@ -1336,7 +1336,7 @@ bool CRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     return false;
   }
 
-  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
 
   // Use the AVPixFmtDescriptor (m_format is AVPixelFormat, set from videoBuffer->GetFormat())
   // to derive the correct per-plane chroma shifts.  This handles 4:2:0, 4:2:2, and 4:4:4
@@ -1432,7 +1432,7 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     if (m_cachedFboTex)
       pl_tex_destroy(gpu, &m_cachedFboTex);
 
-    // Query the actual internal format of the framebuffer colour attachment so
+    // Query the actual internal format of the framebuffer color attachment so
     // libplacebo knows the real output precision. On HDR-capable compositors
     // (e.g. KDE Wayland with HDR) the surface may be GL_RGB10_A2 or wider;
     // lying to libplacebo with GL_RGBA8 would cause it to dither/clamp
