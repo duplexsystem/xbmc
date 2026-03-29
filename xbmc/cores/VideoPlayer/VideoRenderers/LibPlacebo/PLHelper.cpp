@@ -14,11 +14,7 @@
 #include "settings/SettingsComponent.h"
 #include "utils/log.h"
 
-#if defined(HAS_DX)
-#include "rendering/dx/RenderContext.h"
-
-#include <mfobjects.h>
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
 #include <EGL/egl.h>
 #endif
 
@@ -57,10 +53,7 @@ std::shared_ptr<PL::PLInstance> PL::PLInstance::Get()
 
 PL::PLInstance::PLInstance()
   : m_plLog(nullptr),
-#if defined(HAS_DX)
-    m_plD3d11(nullptr),
-    m_plSwapchain(nullptr),
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
     m_plGl(nullptr),
 #endif
     m_plGpu(nullptr),
@@ -82,32 +75,7 @@ bool PL::PLInstance::Init()
   log_param.log_cb = pl_log_cb;
   log_param.log_level = PL_LOG_DEBUG;
   m_plLog = pl_log_create(PL_API_VER, &log_param);
-#if defined(HAS_DX)
-  //d3d device
-  pl_d3d11_params d3d_param{};
-  d3d_param.device = DX::DeviceResources::Get()->GetD3DDevice();
-  d3d_param.adapter = DX::DeviceResources::Get()->GetAdapter();
-  d3d_param.adapter_luid = DX::DeviceResources::Get()->GetAdapterDesc().AdapterLuid;
-  d3d_param.allow_software = true;
-  d3d_param.force_software = false;
-  d3d_param.no_compute = false;
-  d3d_param.debug = false;
-  //libplacebo dont touch it if 0
-  d3d_param.max_frame_latency = 0;
-  //this was added to libplacebo to handle multi threaded rendering for kodi
-
-  m_plD3d11 = pl_d3d11_create(m_plLog, &d3d_param);
-  if (!m_plD3d11)
-    return false;
-  m_plGpu = m_plD3d11->gpu;
-  //swap chain
-  pl_d3d11_swapchain_params swapchain_param{};
-  swapchain_param.swapchain = DX::DeviceResources::Get()->GetSwapChain();
-  //everything else is not used
-  m_plSwapchain = pl_d3d11_create_swapchain(m_plD3d11, &swapchain_param);
-  if (!m_plSwapchain)
-    return false;
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
   pl_opengl_params gl_params = pl_opengl_default_params;
   gl_params.egl_display = eglGetCurrentDisplay();
   gl_params.egl_context = eglGetCurrentContext();
@@ -118,6 +86,9 @@ bool PL::PLInstance::Init()
     return false;
   }
   m_plGpu = m_plGl->gpu;
+#else
+  CLog::Log(LOGERROR, "PLInstance::Init - no libplacebo backend enabled");
+  return false;
 #endif
 
   m_plRenderer = pl_renderer_create(m_plLog, m_plGpu);
@@ -129,10 +100,7 @@ void PL::PLInstance::Reset()
   if (m_isInitialized)
   {
     pl_renderer_destroy(&m_plRenderer);
-#if defined(HAS_DX)
-    pl_swapchain_destroy(&m_plSwapchain);
-    pl_d3d11_destroy(&m_plD3d11);
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
     if (m_plGl)
       pl_opengl_destroy(&m_plGl);
 #endif
@@ -230,140 +198,7 @@ const char* PL::PLInstance::pl_color_system_short_name(pl_color_system sys)
   return pl_color_system_short_names[sys];
 }
 
-#if defined(HAS_DX)
-void PL::PLInstance::fill_d3d_format(pl_d3d_format* info, DXGI_FORMAT format)
-{
-  memset(info, 0, sizeof(pl_d3d_format));
 
-  switch (format)
-  {
-    case DXGI_FORMAT_R10G10B10A2_UNORM:
-      info->bits.color_depth = 10;
-      info->bits.sample_depth = 10;
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_R10G10B10A2_UNORM;
-      info->component_mapping[0][0] = PL_CHANNEL_R;
-      info->component_mapping[0][1] = PL_CHANNEL_G;
-      info->component_mapping[0][2] = PL_CHANNEL_B;
-      info->component_mapping[0][3] = PL_CHANNEL_A;
-      info->components[0] = 4;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->num_planes = 1;
-      strcpy(info->description, "rgba10");
-      break;
-
-    case DXGI_FORMAT_R8G8B8A8_UNORM:
-      info->bits.color_depth = 8;
-      info->bits.sample_depth = 8;
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-      info->component_mapping[0][0] = PL_CHANNEL_R;
-      info->component_mapping[0][1] = PL_CHANNEL_G;
-      info->component_mapping[0][2] = PL_CHANNEL_B;
-      info->component_mapping[0][3] = PL_CHANNEL_A;
-      info->components[0] = 4;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->num_planes = 1;
-      strcpy(info->description, "rgba");
-      break;
-
-    case DXGI_FORMAT_B8G8R8A8_UNORM:
-      info->bits.color_depth = 8;
-      info->bits.sample_depth = 8;
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
-      info->component_mapping[0][0] = PL_CHANNEL_R;
-      info->component_mapping[0][1] = PL_CHANNEL_G;
-      info->component_mapping[0][2] = PL_CHANNEL_B;
-      info->component_mapping[0][3] = PL_CHANNEL_A;
-      info->components[0] = 4;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->num_planes = 1;
-      strcpy(info->description, "bgra");
-      break;
-
-    case DXGI_FORMAT_NV12:
-      info->bits.color_depth = 8;
-      info->bits.sample_depth = 8;
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_R8_UNORM; // Y plane
-      info->planes[1] = DXGI_FORMAT_R8G8_UNORM; // UV plane
-      info->component_mapping[0][0] = PL_CHANNEL_Y;
-      info->component_mapping[1][0] = PL_CHANNEL_U;
-      info->component_mapping[1][1] = PL_CHANNEL_V;
-      info->components[0] = 1;
-      info->components[1] = 2;
-      info->width_div[0] = 1; // full width
-      info->height_div[0] = 1; // full height
-      info->width_div[1] = 2; // half width
-      info->height_div[1] = 2; // half height
-      info->num_planes = 2;
-      strcpy(info->description, "nv12");
-      break;
-
-    case DXGI_FORMAT_P010:
-      info->bits.color_depth = 10;
-      info->bits.sample_depth = 16;
-      info->bits.bit_shift = 6;
-      info->planes[0] = DXGI_FORMAT_R16_UNORM; // Y plane
-      info->planes[1] = DXGI_FORMAT_R16G16_UNORM; // UV plane
-      info->component_mapping[0][0] = PL_CHANNEL_Y;
-      info->component_mapping[1][0] = PL_CHANNEL_U;
-      info->component_mapping[1][1] = PL_CHANNEL_V;
-      info->components[0] = 1;
-      info->components[1] = 2;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->width_div[1] = 2;
-      info->height_div[1] = 2;
-      info->num_planes = 2;
-      strcpy(info->description, "p010");
-      break;
-
-    case DXGI_FORMAT_P016:
-      info->bits.color_depth = 16;
-      info->bits.sample_depth = 16;
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_R16_UNORM;
-      info->planes[1] = DXGI_FORMAT_R16G16_UNORM;
-      info->component_mapping[0][0] = PL_CHANNEL_Y;
-      info->component_mapping[1][0] = PL_CHANNEL_U;
-      info->component_mapping[1][1] = PL_CHANNEL_V;
-      info->components[0] = 1;
-      info->components[1] = 2;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->width_div[1] = 2;
-      info->height_div[1] = 2;
-      info->num_planes = 2;
-      strcpy(info->description, "p016");
-      break;
-
-    case DXGI_FORMAT_YUY2:
-      info->bits.color_depth = 8;
-      info->bits.sample_depth = 16; // packed 2 bytes per component pair
-      info->bits.bit_shift = 0;
-      info->planes[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // pseudo-plane
-      info->component_mapping[0][0] = PL_CHANNEL_R;
-      info->component_mapping[0][1] = PL_CHANNEL_G;
-      info->component_mapping[0][2] = PL_CHANNEL_B;
-      info->component_mapping[0][3] = PL_CHANNEL_A;
-      info->width_div[0] = 1;
-      info->height_div[0] = 1;
-      info->num_planes = 1;
-      strcpy(info->description, "yuy2");
-      break;
-
-    default:
-      info->num_planes = 0;
-      strcpy(info->description, "unknown");
-      break;
-  }
-}
-#endif // HAS_DX
 
 /*Settings conversion*/
 const pl_tone_map_function* PL::PLInstance::GetToneMappingFunction(pl_tone_mapping method)

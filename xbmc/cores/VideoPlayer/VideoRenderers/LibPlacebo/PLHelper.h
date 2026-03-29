@@ -9,9 +9,7 @@
 #pragma once
 
 #include "libplacebo/colorspace.h"
-#if defined(HAS_DX)
-#include "libplacebo/d3d11.h"
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
 #include "libplacebo/opengl.h"
 #endif
 #include "libplacebo/log.h"
@@ -34,34 +32,17 @@ extern "C"
 #include <string>
 #include <vector>
 
-#if defined(HAS_DX)
-#include <d3d9types.h>
-#include <dxva2api.h>
-#endif
+
 #include <libavutil/hdr_dynamic_metadata.h>
 #include <libavutil/mastering_display_metadata.h>
-#if defined(HAS_DX)
-#include <strmif.h>
-#endif
+
 
 #define MAX_FRAME_PASSES 256
 #define MAX_BLEND_PASSES 8
 #define MAX_BLEND_FRAMES 8
 namespace PL
 {
-#if defined(HAS_DX)
-typedef struct pl_d3d_format
-{
-  pl_bit_encoding bits; // per picture
-  DXGI_FORMAT planes[4]; // DXGI format per plane
-  int components[4]; // number of components per plane
-  pl_channel component_mapping[4][4];
-  int width_div[4]; // divide full width by this for each plane
-  int height_div[4]; // divide full height by this for each plane
-  char description[16]; // short description
-  int num_planes; // actual number of planes used
-} pl_d3d_format;
-#endif
+
 
 enum pl_tone_mapping
 {
@@ -103,20 +84,14 @@ public:
   bool Init();
   void Reset();
 
-#if defined(HAS_DX)
-  pl_d3d11 GetD3d11() { return m_plD3d11; }
-  pl_swapchain GetSwapchain() { return m_plSwapchain; }
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
   pl_opengl GetOpenGL() { return m_plGl; }
 #endif
   pl_renderer GetRenderer() { return m_plRenderer; }
   pl_gpu GetGpu() { return m_plGpu; }
 
   pl_log m_plLog;
-#if defined(HAS_DX)
-  pl_d3d11 m_plD3d11;
-  pl_swapchain m_plSwapchain;
-#else
+#if defined(HAS_GL) || defined(HAS_GLES)
   pl_opengl m_plGl;
 #endif
   pl_gpu m_plGpu;
@@ -133,9 +108,7 @@ public:
   static const char* pl_color_system_shorts_name[PL_COLOR_SYSTEM_COUNT];
   static const char* pl_color_system_short_name(pl_color_system sys);
 
-#if defined(HAS_DX)
-  void fill_d3d_format(pl_d3d_format* info, DXGI_FORMAT format);
-#endif
+
 
   const pl_tone_map_function* GetToneMappingFunction(pl_tone_mapping method);
 
