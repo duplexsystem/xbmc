@@ -1234,7 +1234,14 @@ bool CRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   pl_opengl_wrap_params wp{};
   wp.texture = glTex;
   wp.target = GL_TEXTURE_EXTERNAL_OES;
-  wp.iformat = GL_RGBA8;
+  GLenum drmIformat;
+  if (buf.m_srcBits > 10)
+    drmIformat = GL_RGBA16F; // 12-bit (P012) or 16-bit (P016)
+  else if (buf.m_srcBits > 8)
+    drmIformat = GL_RGB10_A2; // 10-bit (P010)
+  else
+    drmIformat = GL_RGBA8; // 8-bit (NV12)
+  wp.iformat = drmIformat;
   wp.width = sz.Width();
   wp.height = sz.Height();
 
@@ -1425,11 +1432,28 @@ bool CRendererPLBase<TBase>::RenderHook(int idx)
     if (m_cachedFboTex)
       pl_tex_destroy(gpu, &m_cachedFboTex);
 
+    // Query the actual internal format of the framebuffer colour attachment so
+    // libplacebo knows the real output precision. On HDR-capable compositors
+    // (e.g. KDE Wayland with HDR) the surface may be GL_RGB10_A2 or wider;
+    // lying to libplacebo with GL_RGBA8 would cause it to dither/clamp
+    // unnecessarily before the compositor receives the frame.
+    GLenum attachment = (fboId == 0) ? GL_BACK : GL_COLOR_ATTACHMENT0;
+    GLint redBits = 8;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
+                                          GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &redBits);
+    GLenum fboIformat;
+    if (redBits > 10)
+      fboIformat = GL_RGBA16F;
+    else if (redBits > 8)
+      fboIformat = GL_RGB10_A2;
+    else
+      fboIformat = GL_RGBA8;
+
     pl_opengl_wrap_params wrapParams{};
     wrapParams.framebuffer = fboId;
     wrapParams.width = viewW;
     wrapParams.height = viewH;
-    wrapParams.iformat = GL_RGBA8;
+    wrapParams.iformat = fboIformat;
 
     m_cachedFboTex = pl_opengl_wrap(gpu, &wrapParams);
     if (!m_cachedFboTex)
