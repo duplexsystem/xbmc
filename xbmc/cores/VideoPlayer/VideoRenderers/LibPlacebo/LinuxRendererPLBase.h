@@ -98,18 +98,18 @@ private:
   // DeleteTexture and the destructor.
   struct SWBuffer
   {
-    GLuint pbo[3]{0, 0, 0}; ///< Pixel Buffer Objects for async CPU→GPU DMA
-    GLsizeiptr pboSize[3]{0, 0, 0}; ///< Allocated PBO size (bytes) for resize detection
-    GLuint tex[3]{0, 0, 0}; ///< Target GL_TEXTURE_2D textures
-    int texW[3]{0, 0, 0}; ///< Cached dimensions for resize detection
-    int texH[3]{0, 0, 0};
-    GLenum texIformat[3]{0, 0, 0}; ///< Cached iformat for format-change detection
+    GLuint pbo[4]{0, 0, 0, 0}; ///< Pixel Buffer Objects for async CPU→GPU DMA
+    GLsizeiptr pboSize[4]{0, 0, 0, 0}; ///< Allocated PBO size (bytes) for resize detection
+    GLuint tex[4]{0, 0, 0, 0}; ///< Target GL_TEXTURE_2D textures
+    int texW[4]{0, 0, 0, 0}; ///< Cached dimensions for resize detection
+    int texH[4]{0, 0, 0, 0};
+    GLenum texIformat[4]{0, 0, 0, 0}; ///< Cached iformat for format-change detection
   };
 
   struct PLBuffer
   {
-    pl_plane planes[3]{};
-    pl_tex tex[3]{};
+    pl_plane planes[4]{};
+    pl_tex tex[4]{};
     int num_planes{0};
     pl_color_space colorSpace{};
     pl_color_repr colorRepr{};
