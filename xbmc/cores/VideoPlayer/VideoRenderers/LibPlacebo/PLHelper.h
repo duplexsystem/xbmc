@@ -12,8 +12,8 @@
 #if defined(HAS_GL) || defined(HAS_GLES)
 #include "libplacebo/opengl.h"
 #endif
-#include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
 #include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
+#include "cores/VideoPlayer/VideoRenderers/RenderInfo.h"
 #include "libplacebo/log.h"
 #include "libplacebo/renderer.h"
 #include "libplacebo/utils/frame_queue.h"
@@ -40,36 +40,6 @@ extern "C"
 namespace PL
 {
 
-enum pl_tone_mapping
-{
-  TONE_MAPPING_AUTO,
-  TONE_MAPPING_CLIP,
-  TONE_MAPPING_MOBIUS,
-  TONE_MAPPING_REINHARD,
-  TONE_MAPPING_HABLE,
-  TONE_MAPPING_GAMMA,
-  TONE_MAPPING_LINEAR,
-  TONE_MAPPING_SPLINE,
-  TONE_MAPPING_BT_2390,
-  TONE_MAPPING_BT_2446A,
-  TONE_MAPPING_ST2094_40,
-  TONE_MAPPING_ST2094_10,
-};
-
-enum pl_gamut_mode
-{
-  GAMUT_AUTO,
-  GAMUT_CLIP,
-  GAMUT_PERCEPTUAL,
-  GAMUT_RELATIVE,
-  GAMUT_SATURATION,
-  GAMUT_ABSOLUTE,
-  GAMUT_DESATURATE,
-  GAMUT_DARKEN,
-  GAMUT_WARN,
-  GAMUT_LINEAR,
-};
-
 class PLInstance
 {
 public:
@@ -92,19 +62,6 @@ public:
 #endif
   pl_gpu m_plGpu;
   pl_renderer m_plRenderer;
-  int CurrentPrim;
-  int Currenttransfer;
-  int CurrentMatrix;
-  void LogCurrent();
-
-  static const char* pl_color_primaries_short_names[PL_COLOR_PRIM_COUNT];
-  static const char* pl_color_primaries_short_name(pl_color_primaries prim);
-  static const char* pl_color_transfer_shorts_name[PL_COLOR_TRC_COUNT];
-  static const char* pl_color_transfer_short_name(pl_color_transfer trc);
-  static const char* pl_color_system_shorts_name[PL_COLOR_SYSTEM_COUNT];
-  static const char* pl_color_system_short_name(pl_color_system sys);
-
-  const pl_tone_map_function* GetToneMappingFunction(pl_tone_mapping method);
 
 private:
   bool m_isInitialized{false};

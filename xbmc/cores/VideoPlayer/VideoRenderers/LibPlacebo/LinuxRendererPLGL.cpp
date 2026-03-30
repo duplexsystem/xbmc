@@ -13,8 +13,6 @@
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "utils/log.h"
 
-#include "system_egl.h"
-
 #if defined(HAVE_LIBVA)
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
 #endif

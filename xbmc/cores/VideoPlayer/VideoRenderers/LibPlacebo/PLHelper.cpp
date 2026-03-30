@@ -57,10 +57,7 @@ PL::PLInstance::PLInstance()
     m_plGl(nullptr),
 #endif
     m_plGpu(nullptr),
-    m_plRenderer(nullptr),
-    CurrentPrim(0),
-    Currenttransfer(0),
-    CurrentMatrix(0)
+    m_plRenderer(nullptr)
 {
 }
 
@@ -106,129 +103,6 @@ void PL::PLInstance::Reset()
 #endif
     pl_log_destroy(&m_plLog);
     m_isInitialized = false;
-  }
-}
-
-void PL::PLInstance::LogCurrent()
-{
-  if (CurrentPrim == PL_COLOR_PRIM_COUNT)
-    CurrentPrim = 0;
-  if (CurrentMatrix == PL_COLOR_SYSTEM_COUNT)
-    CurrentMatrix = 0;
-  if (Currenttransfer == PL_COLOR_TRC_COUNT)
-    Currenttransfer = 0;
-  std::string sSys = pl_color_system_name((pl_color_system)CurrentMatrix);
-  std::string sTrans = pl_color_transfer_name((pl_color_transfer)Currenttransfer);
-  std::string sPrim = pl_color_primaries_name((pl_color_primaries)CurrentPrim);
-  CLog::Log(LOGINFO, "LibPlaceboCurrent Color Settings: Primaries: {}", sPrim.c_str());
-  CLog::Log(LOGINFO, "LibPlaceboCurrent Color Settings: Transfer: {}", sTrans.c_str());
-  CLog::Log(LOGINFO, "LibPlaceboCurrent Color Settings: Matrix: {}", sSys.c_str());
-}
-
-const char* PL::PLInstance::pl_color_primaries_short_names[PL_COLOR_PRIM_COUNT] = {
-    "Auto",
-    "BT.601 NTSC",
-    "BT.601 PAL",
-    "BT.709",
-    "BT.470 M",
-    "EBU Tech.",
-    "BT.2020",
-    "Apple RGB",
-    "Adobe RGB (1998)",
-    "ProPhoto RGB (ROMM)",
-    "CIE 1931 RGB primaries",
-    "DCI-P3",
-    "DCI-P3 with D65",
-    "Panasonic V-Gamut",
-    "Sony S-Gamut",
-    "Traditional film primaries with Illuminant C",
-    "ACES Primaries #0",
-    "ACES Primaries #1"};
-
-const char* PL::PLInstance::pl_color_primaries_short_name(pl_color_primaries prim)
-{
-  assert(prim >= 0 && prim < PL_COLOR_PRIM_COUNT);
-  return pl_color_primaries_short_names[prim];
-}
-
-const char* pl_color_transfer_short_names[PL_COLOR_TRC_COUNT] = {
-    "Auto", // PL_COLOR_TRC_UNKNOWN
-    "BT.1886", // PL_COLOR_TRC_BT_1886
-    "IEC 61966-2-4", // PL_COLOR_TRC_SRGB
-    "Linear light content", // PL_COLOR_TRC_LINEAR
-    "Pure power gamma 1.8", // PL_COLOR_TRC_GAMMA18
-    "Pure power gamma 2.0", // PL_COLOR_TRC_GAMMA20
-    "Pure power gamma 2.2", // PL_COLOR_TRC_GAMMA22
-    "Pure power gamma 2.4", // PL_COLOR_TRC_GAMMA24
-    "Pure power gamma 2.6", // PL_COLOR_TRC_GAMMA26
-    "Pure power gamma 2.8", // PL_COLOR_TRC_GAMMA28
-    "ProPhoto RGB (ROMM)", // PL_COLOR_TRC_PRO_PHOTO
-    "Digital Cinema Distribution", // PL_COLOR_TRC_ST428
-    "BT.2100 PQ", // PL_COLOR_TRC_PQ
-    "BT.2100 HLG", // PL_COLOR_TRC_HLG
-    "Panasonic V-Log", // PL_COLOR_TRC_V_LOG
-    "Sony S-Log1", // PL_COLOR_TRC_S_LOG1
-    "Sony S-Log2" // PL_COLOR_TRC_S_LOG2
-};
-
-const char* PL::PLInstance::pl_color_transfer_short_name(pl_color_transfer trc)
-{
-  assert(trc >= 0 && trc < PL_COLOR_TRC_COUNT);
-  return pl_color_transfer_short_names[trc];
-}
-
-const char* pl_color_system_short_names[PL_COLOR_SYSTEM_COUNT] = {
-    "Auto", // PL_COLOR_SYSTEM_UNKNOWN
-    "BT.601 (SD)", // PL_COLOR_SYSTEM_BT_601
-    "BT.709 (HD)", // PL_COLOR_SYSTEM_BT_709
-    "SMPTE-240M", // PL_COLOR_SYSTEM_SMPTE_240M
-    "BT.2020 N-C", // PL_COLOR_SYSTEM_BT_2020_NC
-    "BT.2020 C", // PL_COLOR_SYSTEM_BT_2020_C
-    "BT.2100 PQ", // PL_COLOR_SYSTEM_BT_2100_PQ
-    "BT.2100 HLG", // PL_COLOR_SYSTEM_BT_2100_HLG
-    "Dolby Vision", // PL_COLOR_SYSTEM_DOLBYVISION
-    "YCgCo", // PL_COLOR_SYSTEM_YCGCO
-    "RGB", // PL_COLOR_SYSTEM_RGB
-    "XYZ" // PL_COLOR_SYSTEM_XYZ
-};
-
-const char* PL::PLInstance::pl_color_system_short_name(pl_color_system sys)
-{
-  assert(sys >= 0 && sys < PL_COLOR_SYSTEM_COUNT);
-  return pl_color_system_short_names[sys];
-}
-
-/*Settings conversion*/
-const pl_tone_map_function* PL::PLInstance::GetToneMappingFunction(pl_tone_mapping method)
-{
-  switch (method)
-  {
-    case TONE_MAPPING_AUTO:
-      return &pl_tone_map_auto;
-    case TONE_MAPPING_CLIP:
-      return &pl_tone_map_clip;
-    case TONE_MAPPING_MOBIUS:
-      return &pl_tone_map_mobius;
-    case TONE_MAPPING_REINHARD:
-      return &pl_tone_map_reinhard;
-    case TONE_MAPPING_HABLE:
-      return &pl_tone_map_hable;
-    case TONE_MAPPING_GAMMA:
-      return &pl_tone_map_gamma;
-    case TONE_MAPPING_LINEAR:
-      return &pl_tone_map_linear;
-    case TONE_MAPPING_SPLINE:
-      return &pl_tone_map_spline;
-    case TONE_MAPPING_BT_2390:
-      return &pl_tone_map_bt2390;
-    case TONE_MAPPING_BT_2446A:
-      return &pl_tone_map_bt2446a;
-    case TONE_MAPPING_ST2094_40:
-      return &pl_tone_map_st2094_40;
-    case TONE_MAPPING_ST2094_10:
-      return &pl_tone_map_st2094_10;
-    default:
-      return nullptr;
   }
 }
 

@@ -17,12 +17,10 @@
 #include "cores/VideoPlayer/Buffers/VideoBufferDRMPRIME.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
 #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
-#include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
 #include "filesystem/File.h"
 #include "settings/Settings.h"
-#include "settings/SettingsComponent.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
@@ -36,15 +34,6 @@
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
 #include <va/va_drmcommon.h>
-
-// Enum constants for GL_EXT_semaphore / GL_EXT_semaphore_fd.
-// Defined here in case the system GL headers predate these extensions.
-#ifndef GL_LAYOUT_GENERAL_EXT
-#define GL_LAYOUT_GENERAL_EXT 0x958D
-#endif
-#ifndef GL_HANDLE_TYPE_SYNC_FD_EXT
-#define GL_HANDLE_TYPE_SYNC_FD_EXT 0x9586
-#endif
 #endif // HAVE_LIBVA
 
 extern "C"
@@ -127,12 +116,12 @@ private:
     pl_dovi_metadata doviMetadata{}; ///< Owned copy; colorRepr.dovi points here when valid
     unsigned int iFlags{0}; ///< DVP_FLAG_* interlace flags
     bool loaded{false};
-    // Pending GL semaphore imported from a DMA-buf sync-file fence
-    // (GL_EXT_semaphore_fd).  Non-zero means glWaitSemaphoreEXT has NOT been
-    // called yet for this slot.  Used by both the VAAPI and DRMPRIME paths.
-    GLuint fenceSemaphore{0};
-    GLuint fenceTextures[3]{}; ///< GL texture handles for the barrier
-    int nFenceTextures{0};
+    
+    // Pending EGL sync object imported from a DMA-buf sync-file fence.
+    // EGL_NO_SYNC_KHR means eglWaitSyncKHR has already been called or no sync is needed.
+    // Used by both the VAAPI and DRMPRIME paths.
+    EGLSyncKHR eglSyncFence{EGL_NO_SYNC_KHR};
+    
 #if defined(HAVE_LIBVA)
     GLuint vaapiGLTex[3]{};
     EGLImageKHR vaapiEGLImage[3]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
@@ -150,9 +139,11 @@ private:
   // GPU-side sync redundant for both VAAPI and DRMPRIME paths.
   bool m_hasEGLModifiers{false};
 
+  // EGL context used globally for Sync objects and Image KHR
+  EGLDisplay m_eglDisplay{EGL_NO_DISPLAY};
+
 #if defined(HAVE_LIBVA)
   bool m_isVAAPI{false};
-  EGLDisplay m_eglDisplay{EGL_NO_DISPLAY};
   PFNEGLCREATEIMAGEKHRPROC m_eglCreateImageKHR{nullptr};
   PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR{nullptr};
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
@@ -209,27 +200,17 @@ private:
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
 
-  // GL_EXT_semaphore + GL_EXT_semaphore_fd: GPU-side DMA-buf fence wait.
+  // EGL_ANDROID_native_fence_sync: GPU-side DMA-buf fence wait.
   //
-  // Used for both VAAPI and DRMPRIME paths.  When these extensions and the
+  // Used for both VAAPI and DRMPRIME paths.  When this extension and the
   // DMA_BUF_IOCTL_EXPORT_SYNC_FILE ioctl (kernel ≥ 5.2) are available, we
-  // export the DMA-buf read fence as a sync-file fd, import it as a GL
-  // semaphore, and call glWaitSemaphoreEXT — a GPU command-stream wait that
+  // export the DMA-buf read fence as a sync-file fd, import it as an EGL
+  // sync object, and call eglWaitSyncKHR — a GPU command-stream wait that
   // never stalls the CPU.
-  //
-  // Function pointer types use private aliases to avoid conflicts with system
-  // GL headers that may define the same PFNGL…PROC typedefs differently.
-  using FnGlGenSemaphoresEXT = void (*)(GLsizei, GLuint*);
-  using FnGlDeleteSemaphoresEXT = void (*)(GLsizei, const GLuint*);
-  using FnGlImportSemaphoreFdEXT = void (*)(GLuint, GLenum, GLint);
-  using FnGlWaitSemaphoreEXT =
-      void (*)(GLuint, GLuint, const GLuint*, GLuint, const GLuint*, const GLenum*);
-
-  FnGlGenSemaphoresEXT m_glGenSemaphoresEXT{nullptr};
-  FnGlDeleteSemaphoresEXT m_glDeleteSemaphoresEXT{nullptr};
-  FnGlImportSemaphoreFdEXT m_glImportSemaphoreFdEXT{nullptr};
-  FnGlWaitSemaphoreEXT m_glWaitSemaphoreEXT{nullptr};
-  bool m_hasGLSemaphoreFd{false};
+  PFNEGLCREATESYNCKHRPROC m_eglCreateSyncKHR{nullptr};
+  PFNEGLDESTROYSYNCKHRPROC m_eglDestroySyncKHR{nullptr};
+  PFNEGLWAITSYNCKHRPROC m_eglWaitSyncKHR{nullptr};
+  bool m_hasEGLSyncFence{false};
 
   bool UploadVAAPI(int index, PLBuffer& plbuf);
   bool UploadDRMPRIME(int index, PLBuffer& plbuf);
@@ -301,17 +282,20 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_colorSpace.transfer = pl_transfer_from_av(picture.color_transfer);
   m_chromaLocation = pl_chroma_from_av(picture.chroma_position);
 
+  m_eglDisplay = eglGetCurrentDisplay();
+  if (m_eglDisplay == EGL_NO_DISPLAY)
+    m_eglDisplay = GetDRMPRIMEEGLDisplay();
+
   // Probe EGL DMA-buf modifier support unconditionally: applies to both VAAPI
   // and DRMPRIME.  When present, eglCreateImageKHR implicitly attaches the
   // DMA-buf reservation fence to the EGLImage so the GPU waits automatically —
-  // no explicit CPU stall or GL semaphore is needed.
+  // no explicit CPU stall or explicit sync is needed.
   m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
 
 #if defined(HAVE_LIBVA)
   m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
   if (m_isVAAPI)
   {
-    m_eglDisplay = eglGetCurrentDisplay();
     m_eglCreateImageKHR =
         reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
     m_eglDestroyImageKHR =
@@ -367,28 +351,25 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
     m_glNoError = (ctxFlags & GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR) != 0;
   }
 
-  // Probe GL_EXT_semaphore + GL_EXT_semaphore_fd.
+  // Probe EGL_ANDROID_native_fence_sync + KHR_wait_sync
   // Used by both VAAPI (replaces vaSyncSurface() CPU stall) and DRMPRIME
   // (adds explicit GPU-side sync for V4L2/VC4 decode fences on RPi5 etc.).
   // Only meaningful when DMA_BUF_IOCTL_EXPORT_SYNC_FILE is also available
-  // at compile time (kernel ≥ 5.2 headers); the runtime ioctl call provides
-  // its own fallback to vaSyncSurface() / no-sync if the ioctl fails.
+  // at compile time (kernel ≥ 5.2 headers).
   {
-    auto* gen = eglGetProcAddress("glGenSemaphoresEXT");
-    auto* del = eglGetProcAddress("glDeleteSemaphoresEXT");
-    auto* imp = eglGetProcAddress("glImportSemaphoreFdEXT");
-    auto* wai = eglGetProcAddress("glWaitSemaphoreEXT");
-    if (gen && del && imp && wai)
+    auto* createSync = eglGetProcAddress("eglCreateSyncKHR");
+    auto* destroySync = eglGetProcAddress("eglDestroySyncKHR");
+    auto* waitSync = eglGetProcAddress("eglWaitSyncKHR");
+    if (createSync && destroySync && waitSync)
     {
-      m_glGenSemaphoresEXT = reinterpret_cast<FnGlGenSemaphoresEXT>(gen);
-      m_glDeleteSemaphoresEXT = reinterpret_cast<FnGlDeleteSemaphoresEXT>(del);
-      m_glImportSemaphoreFdEXT = reinterpret_cast<FnGlImportSemaphoreFdEXT>(imp);
-      m_glWaitSemaphoreEXT = reinterpret_cast<FnGlWaitSemaphoreEXT>(wai);
-      m_hasGLSemaphoreFd = true;
+      m_eglCreateSyncKHR = reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(createSync);
+      m_eglDestroySyncKHR = reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(destroySync);
+      m_eglWaitSyncKHR = reinterpret_cast<PFNEGLWAITSYNCKHRPROC>(waitSync);
+      m_hasEGLSyncFence = true;
     }
     else
     {
-      m_hasGLSemaphoreFd = false;
+      m_hasEGLSyncFence = false;
     }
   }
 
@@ -693,9 +674,9 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   //  1. Implicit fencing (m_hasEGLModifiers): the kernel/EGL stack inserts a
   //     DMA-buf fence automatically when eglCreateImageKHR is called.  No
   //     explicit sync needed at all.
-  //  2. GL_EXT_semaphore_fd (m_hasGLSemaphoreFd): export a sync-file fd from
-  //     the DMA-buf via DMA_BUF_IOCTL_EXPORT_SYNC_FILE, then import it as a
-  //     GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+  //  2. EGL_ANDROID_native_fence_sync (m_hasEGLSyncFence): export a sync-file fd
+  //     from the DMA-buf via DMA_BUF_IOCTL_EXPORT_SYNC_FILE, then import it as an
+  //     EGL Sync Object.  eglWaitSyncKHR (called in RenderHook) inserts the
   //     wait into the GPU command stream — the CPU thread returns immediately.
   //  3. vaSyncSurface(): CPU-blocking stall.  Used only when neither of the
   //     above is available.
@@ -703,7 +684,7 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   {
     bool syncHandled = false;
 #if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-    if (m_hasGLSemaphoreFd)
+    if (m_hasEGLSyncFence)
     {
       // vaExportSurfaceHandle (called below) gives us the DMA-buf fds.
       // We need to export the fence AFTER vaExportSurfaceHandle so the
@@ -733,11 +714,11 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
 
 #if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-  // GL_EXT_semaphore_fd path: export a read fence from the first DMA-buf
-  // object and import it as a GL semaphore.  glWaitSemaphoreEXT (called in
+  // EGL_ANDROID_native_fence_sync path: export a read fence from the first DMA-buf
+  // object and import it as an EGL Sync object. eglWaitSyncKHR (called in
   // RenderHook) submits the wait to the GPU command stream asynchronously —
   // the CPU is not stalled here.
-  if (!m_hasEGLModifiers && m_hasGLSemaphoreFd && plbuf.vaapiNumFds > 0)
+  if (!m_hasEGLModifiers && m_hasEGLSyncFence && plbuf.vaapiNumFds > 0)
   {
     dma_buf_export_sync_file syncExport{};
     syncExport.flags = DMA_BUF_SYNC_READ;
@@ -745,17 +726,13 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
         syncExport.fd >= 0)
     {
-      GLuint sem = 0;
-      m_glGenSemaphoresEXT(1, &sem);
-      // The fd is consumed (transferred to the GL driver) by the import call.
-      m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
-      plbuf.fenceSemaphore = sem;
-      // Populate the texture barrier list: all VAAPI plane textures.
-      plbuf.nFenceTextures = 0;
-      for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
+      const EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE };
+      plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+      
+      // If EGL failed to create the sync object, we must close the fd ourselves
+      if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
       {
-        if (plbuf.vaapiGLTex[n])
-          plbuf.fenceTextures[plbuf.nFenceTextures++] = plbuf.vaapiGLTex[n];
+        close(syncExport.fd);
       }
     }
     else
@@ -999,13 +976,13 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   // GPU-side fence for the V4L2 / DRMPRIME decode path (e.g. bcm2835-codec on
   // RPi5).  The VC4/V3D pipeline sets a DMA-buf read fence on the output
   // buffer when decode completes; we export it as a sync-file and import it
-  // as a GL semaphore.  glWaitSemaphoreEXT (called in RenderHook) inserts the
+  // as an EGL Sync object.  eglWaitSyncKHR (called in RenderHook) inserts the
   // wait into the GPU command stream without stalling the CPU.
   //
   // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
   // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
-  // reservation fence implicitly — adding an explicit semaphore is redundant.
-  if (m_hasGLSemaphoreFd && !m_hasEGLModifiers)
+  // reservation fence implicitly — adding an explicit explicit sync is redundant.
+  if (m_hasEGLSyncFence && !m_hasEGLModifiers)
   {
     const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
     if (desc && desc->nb_objects > 0)
@@ -1016,12 +993,13 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
       if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
           syncExport.fd >= 0)
       {
-        GLuint sem = 0;
-        m_glGenSemaphoresEXT(1, &sem);
-        m_glImportSemaphoreFdEXT(sem, GL_HANDLE_TYPE_SYNC_FD_EXT, syncExport.fd);
-        plbuf.fenceSemaphore = sem;
-        plbuf.fenceTextures[0] = glTex;
-        plbuf.nFenceTextures = 1;
+        EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE };
+        plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+        
+        if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
+        {
+          close(syncExport.fd);
+        }
       }
     }
   }
@@ -1067,8 +1045,8 @@ bool CLinuxRendererPLBase<TBase>::PlaneDataToGLFormats(
     const pl_plane_data& pd, GLenum& iformat, GLenum& format, GLenum& type, int& bytesPerPixel)
 {
   int numComp = 0;
-  for (int c = 0; c < 4; ++c)
-    if (pd.component_size[c] > 0)
+  for (const int c : pd.component_size)
+    if (c > 0)
       ++numComp;
   if (numComp == 0)
     return false;
@@ -1439,25 +1417,22 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   }
   const GLint savedVAO = m_kodiVAO;
 
-  // GPU-side DMA-buf fence wait (GL_EXT_semaphore_fd).
+  // GPU-side DMA-buf fence wait (EGL_ANDROID_native_fence_sync).
   // UploadTexture() may have imported a DMA-buf sync-file fence for VAAPI or
-  // DRMPRIME frames.  Drain all pending semaphores here — after pl_queue_update
+  // DRMPRIME frames.  Drain all pending sync objects here — after pl_queue_update
   // has completed its MapCallback chain, before any pl_render_image[_mix]
-  // command touches the textures.  glWaitSemaphoreEXT inserts the wait into the
+  // command touches the textures.  eglWaitSyncKHR inserts the wait into the
   // GPU command stream; the CPU thread returns immediately.
-  if (m_hasGLSemaphoreFd)
+  if (m_hasEGLSyncFence)
   {
     for (auto& fbuf : m_plBuffers)
     {
-      if (!fbuf.fenceSemaphore)
-        continue;
-
-      GLenum layouts[3] = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
-      m_glWaitSemaphoreEXT(fbuf.fenceSemaphore, 0, nullptr,
-                           static_cast<GLuint>(fbuf.nFenceTextures), fbuf.fenceTextures, layouts);
-      m_glDeleteSemaphoresEXT(1, &fbuf.fenceSemaphore);
-      fbuf.fenceSemaphore = 0;
-      fbuf.nFenceTextures = 0;
+      if (fbuf.eglSyncFence != EGL_NO_SYNC_KHR)
+      {
+        m_eglWaitSyncKHR(m_eglDisplay, fbuf.eglSyncFence, 0);
+        m_eglDestroySyncKHR(m_eglDisplay, fbuf.eglSyncFence);
+        fbuf.eglSyncFence = EGL_NO_SYNC_KHR;
+      }
     }
   }
 
@@ -1534,14 +1509,13 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
 #if defined(HAVE_LIBVA)
   if (m_isVAAPI)
   {
-    // Drop any pending fence semaphore.  If the wait hasn't fired yet the
-    // semaphore object is simply deleted; the associated sync object is
-    // released by the GL driver without blocking the CPU.
-    if (plbuf.fenceSemaphore && m_glDeleteSemaphoresEXT)
+    // Drop any pending EGL sync object. eglDestroySyncKHR deletes the object
+    // immediately; if a wait is pending, the driver keeps the underlying fence
+    // alive until the wait completes.
+    if (plbuf.eglSyncFence != EGL_NO_SYNC_KHR && m_eglDestroySyncKHR)
     {
-      m_glDeleteSemaphoresEXT(1, &plbuf.fenceSemaphore);
-      plbuf.fenceSemaphore = 0;
-      plbuf.nFenceTextures = 0;
+      m_eglDestroySyncKHR(m_eglDisplay, plbuf.eglSyncFence);
+      plbuf.eglSyncFence = EGL_NO_SYNC_KHR;
     }
 
     pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
@@ -1582,12 +1556,11 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
   if (!plbuf.loaded)
     return;
 
-  // Drop any pending fence semaphore (DRMPRIME path).
-  if (plbuf.fenceSemaphore && m_glDeleteSemaphoresEXT)
+  // Drop any pending EGL sync object (DRMPRIME path).
+  if (plbuf.eglSyncFence != EGL_NO_SYNC_KHR && m_eglDestroySyncKHR)
   {
-    m_glDeleteSemaphoresEXT(1, &plbuf.fenceSemaphore);
-    plbuf.fenceSemaphore = 0;
-    plbuf.nFenceTextures = 0;
+    m_eglDestroySyncKHR(m_eglDisplay, plbuf.eglSyncFence);
+    plbuf.eglSyncFence = EGL_NO_SYNC_KHR;
   }
 
   m_drmTextures[index].Unmap();
