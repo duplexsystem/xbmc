@@ -1380,7 +1380,12 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
       frameOut.color.hdr.max_luma = peakLuminance;
   }
 
-  m_plConfig->ApplyCMS(frameOut, this->m_srcPrimaries);
+  // CMS (ICC profile / 3D LUT) is SDR colour management.  Do not apply it when
+  // the output frame is in HDR passthrough mode (PQ/HLG transfer) — libplacebo
+  // would apply SDR colour management on top of an HDR signal, producing wrong
+  // colours (e.g. blown-out cyan sky when an SDR ICC profile is active).
+  if (!this->m_passthroughHDR)
+    m_plConfig->ApplyCMS(frameOut, this->m_srcPrimaries);
 
   pl_render_params params = m_plConfig->GetOptions()->params;
   params.border = PL_CLEAR_SKIP;
