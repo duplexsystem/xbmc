@@ -73,18 +73,21 @@
         </setting>
         <setting id="videoplayer.libplacebo.deband" type="boolean" label="13477" help="13478">
           <requirement>HAS_LIBPLACEBO</requirement>
+          <visible>false</visible>
           <level>2</level>
           <default>true</default>
           <control type="toggle" />
         </setting>
         <setting id="videoplayer.libplacebo.peakdetect" type="boolean" label="13479" help="13480">
           <requirement>HAS_LIBPLACEBO</requirement>
+          <visible>false</visible>
           <level>2</level>
           <default>true</default>
           <control type="toggle" />
         </setting>
         <setting id="videoplayer.libplacebo.framemix" type="boolean" label="13481" help="13482">
           <requirement>HAS_LIBPLACEBO</requirement>
+          <visible>false</visible>
           <level>2</level>
           <default>false</default>
           <control type="toggle" />
