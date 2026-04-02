@@ -141,7 +141,7 @@ public:
   ~RenderConfig();
 
   // Applies Kodi GUI video settings (brightness, quality, algorithms)
-  void UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings);
+  void UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings) const;
 
   // Reloads CMS LUT / ICC profile based on settings
   void ApplyCMS(pl_frame& frameOut, AVColorPrimaries srcPrimaries);

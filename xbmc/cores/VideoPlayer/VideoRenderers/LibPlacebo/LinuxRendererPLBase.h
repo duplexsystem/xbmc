@@ -1366,9 +1366,14 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
                                                                            : PL_COLOR_LEVELS_FULL;
 
-  // Display peak luminance — tells libplacebo's tone mapper the target brightness.
-  // GetGuiSdrPeakLuminance() returns the configured or OS-reported display peak in
-  // cd/m², or 0.0 when unknown (libplacebo then uses its own default of 203 cd/m²).
+  // SDR display peak luminance — only set for SDR output (BT.1886 / non-passthrough).
+  // In passthrough HDR mode the output transfer is PQ/HLG and libplacebo is writing
+  // the full HDR signal; setting max_luma to the SDR peak (200-400 cd/m²) would
+  // incorrectly cause libplacebo to tone-map 1000-nit HDR into that narrow window,
+  // compressing saturated out-of-gamut colours (blues, reds, yellows) against the
+  // ceiling and making them look blown out.  For passthrough, leave max_luma = 0 so
+  // libplacebo uses the content's own metadata for any intra-format scaling.
+  if (!this->m_passthroughHDR)
   {
     const float peakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
     if (peakLuminance > 0.0f)

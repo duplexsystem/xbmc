@@ -16,6 +16,8 @@
 
 #if defined(HAS_GL) || defined(HAS_GLES)
 #include <EGL/egl.h>
+
+#include <memory>
 #endif
 
 static void pl_log_cb(void*, enum pl_log_level level, const char* msg)
@@ -47,7 +49,7 @@ static void pl_log_cb(void*, enum pl_log_level level, const char* msg)
 
 std::shared_ptr<PL::PLInstance> PL::PLInstance::Get()
 {
-  static std::shared_ptr<PLInstance> sPLResources(new PLInstance);
+  static std::shared_ptr<PLInstance> sPLResources = std::make_shared<PLInstance>();
   return sPLResources;
 }
 
@@ -155,7 +157,7 @@ void PL::RenderConfig::ResetCmsState()
 }
 
 void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
-                                         const CVideoSettings& videoSettings)
+                                         const CVideoSettings& videoSettings) const
 {
   pl_options_reset(m_plOpts, nullptr);
 
@@ -216,6 +218,9 @@ void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
     const float contrast = videoSettings.m_Contrast / 50.0f;
     if (brightness != 0.0f || contrast != 1.0f)
     {
+      // Initialise to neutral first so saturation/gamma/hue/temperature stay
+      // at their identity values and only the user-controlled fields are changed.
+      m_plOpts->color_adjustment = pl_color_adjustment_neutral;
       m_plOpts->color_adjustment.brightness = brightness;
       m_plOpts->color_adjustment.contrast = contrast;
       m_plOpts->params.color_adjustment = &m_plOpts->color_adjustment;
