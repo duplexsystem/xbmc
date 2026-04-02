@@ -77,6 +77,7 @@ public:
 
   virtual bool WantsDoublePass() { return false; }
 
+  void SetFps(float fps) { m_fps = fps; }
   void SetViewMode(int viewMode);
 
   /*! \brief Get video rectangle and view window
