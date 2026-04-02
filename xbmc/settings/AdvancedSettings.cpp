@@ -875,45 +875,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     }
   }
 
-  pElement = pRootElement->FirstChildElement("libplacebo");
-  if (pElement)
-  {
-    // Scaling
-    XMLUtils::GetString(pElement, "preset", m_libplaceboPreset);
-    XMLUtils::GetString(pElement, "framemixer", m_libplaceboFrameMixer);
-    XMLUtils::GetString(pElement, "antiringing", m_libplaceboAntiringing);
-    XMLUtils::GetString(pElement, "sigmoid", m_libplaceboSigmoid);
-    // Debanding
-    XMLUtils::GetString(pElement, "deband", m_libplaceboDeband);
-    XMLUtils::GetString(pElement, "debanditerations", m_libplaceboDebandIterations);
-    XMLUtils::GetString(pElement, "debandthreshold", m_libplaceboDebandThreshold);
-    XMLUtils::GetString(pElement, "debandradius", m_libplaceboDebandRadius);
-    XMLUtils::GetString(pElement, "debandgrain", m_libplaceboDebandGrain);
-    // Peak detection
-    XMLUtils::GetString(pElement, "peakdetect", m_libplaceboPeakDetect);
-    XMLUtils::GetString(pElement, "smoothingperiod", m_libplaceboSmoothingPeriod);
-    XMLUtils::GetString(pElement, "scenethresholdlow", m_libplaceboSceneThresholdLow);
-    XMLUtils::GetString(pElement, "scenethresholdhigh", m_libplaceboSceneThresholdHigh);
-    XMLUtils::GetString(pElement, "peakpercentile", m_libplaceboPeakPercentile);
-    // Tone/gamut mapping
-    XMLUtils::GetString(pElement, "tonemapping", m_libplaceboToneMapping);
-    XMLUtils::GetString(pElement, "tonemappingparam", m_libplaceboToneMappingParam);
-    XMLUtils::GetString(pElement, "gamutmapping", m_libplaceboGamutMapping);
-    XMLUtils::GetString(pElement, "gamutexpansion", m_libplaceboGamutExpansion);
-    // Dithering
-    XMLUtils::GetString(pElement, "dithermethod", m_libplaceboDitherMethod);
-    XMLUtils::GetString(pElement, "ditherlutsize", m_libplaceboDitherLutSize);
-    // Deinterlacing
-    XMLUtils::GetString(pElement, "deinterlace", m_libplaceboDeinterlace);
-    XMLUtils::GetString(pElement, "deinterlacealgo", m_libplaceboDeinterlaceAlgo);
-    // Misc
-    XMLUtils::GetString(pElement, "skipantialiasing", m_libplaceboSkipAntiAliasing);
-    XMLUtils::GetString(pElement, "disablelinear", m_libplaceboDisableLinear);
-    XMLUtils::GetString(pElement, "disablebuiltinscalers", m_libplaceboDisableBuiltinScalers);
-    XMLUtils::GetString(pElement, "forcedither", m_libplaceboForceDither);
-    XMLUtils::GetString(pElement, "disablefbos", m_libplaceboDisableFbos);
-  }
-
   pElement = pRootElement->FirstChildElement("musiclibrary");
   if (pElement)
   {
