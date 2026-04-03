@@ -52,6 +52,19 @@ extern "C"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+// GL_R16 / GL_RG16 / GL_RGBA16 are desktop GL core.  GLES exposes them via
+// GL_EXT_texture_norm16 under the _EXT suffix but with identical enum values.
+// Define the un-suffixed names as fallbacks so the same code compiles on both.
+#ifndef GL_R16
+#define GL_R16 0x822A
+#endif
+#ifndef GL_RG16
+#define GL_RG16 0x822C
+#endif
+#ifndef GL_RGBA16
+#define GL_RGBA16 0x805B
+#endif
+
 /**
  * @brief CRTP mixin providing the shared libplacebo renderer implementation.
  *
@@ -345,11 +358,16 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
   // Detect GL_KHR_no_error: if the context was created with no-error mode,
   // glGetError() is a no-op and we can skip the pre-render drain entirely.
+  // GL_CONTEXT_FLAGS is a desktop GL query; GLES does not expose it.
+#if defined(HAS_GL)
   {
     GLint ctxFlags = 0;
     glGetIntegerv(GL_CONTEXT_FLAGS, &ctxFlags);
     m_glNoError = (ctxFlags & GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR) != 0;
   }
+#else
+  m_glNoError = false;
+#endif
 
   // Probe EGL_ANDROID_native_fence_sync + KHR_wait_sync
   // Used by both VAAPI (replaces vaSyncSurface() CPU stall) and DRMPRIME
