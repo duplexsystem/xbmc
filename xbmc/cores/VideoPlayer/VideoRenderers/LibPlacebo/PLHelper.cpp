@@ -122,6 +122,11 @@ bool PL::PLInstance::Init()
   pl_opengl_params gl_params = pl_opengl_default_params;
   gl_params.egl_display = eglDpy;
   gl_params.egl_context = eglCtx;
+  // Explicitly provide eglGetProcAddress so libplacebo uses EGL's function
+  // loader rather than its own internal logic (which may fail to load core
+  // GLES functions on some platforms, e.g. Broadcom V3D on RPi5).
+  gl_params.get_proc_addr =
+      reinterpret_cast<pl_voidfunc_t (*)(const char*)>(eglGetProcAddress);
   m_plGl = pl_opengl_create(m_plLog, &gl_params);
   if (!m_plGl)
   {
