@@ -10,8 +10,10 @@ set(HEADERS
 
 if (NOT (WIN32 OR WINDOWS_STORE))
     list(APPEND HEADERS LinuxRendererPLBase.h)
-    list(APPEND SOURCES LinuxRendererPLGL.cpp)
-    list(APPEND HEADERS LinuxRendererPLGL.h)
+    if (TARGET ${APP_NAME_LC}::OpenGl)
+        list(APPEND SOURCES LinuxRendererPLGL.cpp)
+        list(APPEND HEADERS LinuxRendererPLGL.h)
+    endif ()
     if (TARGET ${APP_NAME_LC}::OpenGLES)
         list(APPEND SOURCES LinuxRendererPLGLES.cpp)
         list(APPEND HEADERS LinuxRendererPLGLES.h)
