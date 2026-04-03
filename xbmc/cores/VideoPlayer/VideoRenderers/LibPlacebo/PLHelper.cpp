@@ -99,6 +99,19 @@ bool PL::PLInstance::Init()
   if (eglCtx == EGL_NO_CONTEXT)
     eglCtx = eglGetCurrentContext();
 
+  // If the context is not current on this thread, make it current now.
+  // libplacebo calls eglGetCurrentContext() internally even when egl_context
+  // is provided in params, so the context must be bound to the calling thread.
+  // This is safe: on GBM the context is surfaceless and not held by any
+  // thread between render frames, so eglMakeCurrent will succeed.
+  const bool needMakeCurrent =
+      (eglCtx != EGL_NO_CONTEXT && eglGetCurrentContext() != eglCtx);
+  if (needMakeCurrent)
+  {
+    if (!eglMakeCurrent(eglDpy, EGL_NO_SURFACE, EGL_NO_SURFACE, eglCtx))
+      CLog::Log(LOGWARNING, "PLInstance::Init - eglMakeCurrent failed: 0x{:x}", eglGetError());
+  }
+
   pl_opengl_params gl_params = pl_opengl_default_params;
   gl_params.egl_display = eglDpy;
   gl_params.egl_context = eglCtx;
