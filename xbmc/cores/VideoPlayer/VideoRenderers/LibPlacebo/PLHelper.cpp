@@ -9,6 +9,7 @@
 #include "PLHelper.h"
 
 #include "ServiceBroker.h"
+#include "filesystem/Directory.h"
 #include "filesystem/File.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
@@ -59,7 +60,8 @@ PL::PLInstance::PLInstance()
     m_plGl(nullptr),
 #endif
     m_plGpu(nullptr),
-    m_plRenderer(nullptr)
+    m_plRenderer(nullptr),
+    m_plCache(nullptr)
 {
 }
 
@@ -90,15 +92,27 @@ bool PL::PLInstance::Init()
   return false;
 #endif
 
+  // Create shader cache, load any previously-saved entries, then attach to the
+  // GPU before the renderer is created so shader compilation can be cached.
+  pl_cache_params cacheParams{};
+  cacheParams.log = m_plLog;
+  cacheParams.max_total_size = 64 * 1024 * 1024; // 64 MB cap
+  m_plCache = pl_cache_create(&cacheParams);
+  LoadCache();
+  pl_gpu_set_cache(m_plGpu, m_plCache);
+
   m_plRenderer = pl_renderer_create(m_plLog, m_plGpu);
   m_isInitialized = true;
   return true;
 }
+
 void PL::PLInstance::Reset()
 {
   if (m_isInitialized)
   {
     pl_renderer_destroy(&m_plRenderer);
+    SaveCache();
+    pl_cache_destroy(&m_plCache);
 #if defined(HAS_GL) || defined(HAS_GLES)
     if (m_plGl)
       pl_opengl_destroy(&m_plGl);
@@ -106,6 +120,63 @@ void PL::PLInstance::Reset()
     pl_log_destroy(&m_plLog);
     m_isInitialized = false;
   }
+}
+
+static constexpr const char* kCacheDir = "special://profile/libplacebo/";
+static constexpr const char* kCachePath = "special://profile/libplacebo/shadercache.bin";
+
+void PL::PLInstance::LoadCache()
+{
+  XFILE::CFile f;
+  if (!f.Open(kCachePath))
+    return;
+
+  const int loaded = pl_cache_load_ex(
+      m_plCache,
+      [](void* priv, size_t size, void* ptr) -> bool {
+        return static_cast<XFILE::CFile*>(priv)->Read(ptr, size) ==
+               static_cast<ssize_t>(size);
+      },
+      &f);
+  f.Close();
+
+  if (loaded >= 0)
+  {
+    m_cacheSignature = pl_cache_signature(m_plCache);
+    CLog::Log(LOGDEBUG, "PLInstance::LoadCache - loaded {} shader objects ({} bytes)", loaded,
+              pl_cache_size(m_plCache));
+  }
+  else
+  {
+    CLog::Log(LOGWARNING, "PLInstance::LoadCache - cache file corrupt, ignoring");
+  }
+}
+
+void PL::PLInstance::SaveCache()
+{
+  if (!m_plCache || pl_cache_signature(m_plCache) == m_cacheSignature)
+    return; // nothing new to persist
+
+  if (!XFILE::CDirectory::Exists(kCacheDir))
+    XFILE::CDirectory::Create(kCacheDir);
+
+  XFILE::CFile f;
+  if (!f.OpenForWrite(kCachePath, true))
+  {
+    CLog::Log(LOGERROR, "PLInstance::SaveCache - failed to open cache file for writing");
+    return;
+  }
+
+  pl_cache_save_ex(
+      m_plCache,
+      [](void* priv, size_t size, const void* ptr) {
+        static_cast<XFILE::CFile*>(priv)->Write(ptr, size);
+      },
+      &f);
+  f.Close();
+
+  CLog::Log(LOGDEBUG, "PLInstance::SaveCache - saved {} shader objects ({} bytes)",
+            pl_cache_objects(m_plCache), pl_cache_size(m_plCache));
 }
 
 const char* PL::KodiScalingToPlacebo(ESCALINGMETHOD method)

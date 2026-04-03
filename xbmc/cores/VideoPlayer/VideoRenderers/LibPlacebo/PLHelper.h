@@ -19,6 +19,8 @@
 #include "libplacebo/utils/frame_queue.h"
 #include "libplacebo/utils/upload.h"
 
+#include <libplacebo/cache.h>
+#include <libplacebo/gpu.h>
 #include <libplacebo/options.h>
 #include <libplacebo/shaders/icc.h>
 extern "C"
@@ -62,9 +64,14 @@ public:
 #endif
   pl_gpu m_plGpu;
   pl_renderer m_plRenderer;
+  pl_cache m_plCache;
 
 private:
+  void LoadCache();
+  void SaveCache();
+
   bool m_isInitialized{false};
+  uint64_t m_cacheSignature{0};
 };
 
 constexpr pl_rotation RotationFromOrientation(unsigned int deg)
