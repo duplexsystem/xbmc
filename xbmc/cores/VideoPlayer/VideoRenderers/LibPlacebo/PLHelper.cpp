@@ -16,6 +16,9 @@
 #include "utils/log.h"
 
 #if defined(HAS_GL) || defined(HAS_GLES)
+#include "windowing/WinSystem.h"
+#include "windowing/linux/WinSystemEGL.h"
+
 #include <EGL/egl.h>
 
 #include <memory>
@@ -77,8 +80,20 @@ bool PL::PLInstance::Init()
   log_param.log_level = PL_LOG_DEBUG;
   m_plLog = pl_log_create(PL_API_VER, &log_param);
 #if defined(HAS_GL) || defined(HAS_GLES)
+  // Prefer the windowing system's EGL display over eglGetCurrentDisplay().
+  // On GBM/RPi5, eglGetCurrentDisplay() can return EGL_NO_DISPLAY even when
+  // a context is active because the platform display is obtained via
+  // eglGetPlatformDisplay() rather than eglGetDisplay(EGL_DEFAULT_DISPLAY).
+  EGLDisplay eglDpy = EGL_NO_DISPLAY;
+  auto* winEGL =
+      dynamic_cast<KODI::WINDOWING::LINUX::CWinSystemEGL*>(CServiceBroker::GetWinSystem());
+  if (winEGL)
+    eglDpy = winEGL->GetEGLDisplay();
+  if (eglDpy == EGL_NO_DISPLAY)
+    eglDpy = eglGetCurrentDisplay();
+
   pl_opengl_params gl_params = pl_opengl_default_params;
-  gl_params.egl_display = eglGetCurrentDisplay();
+  gl_params.egl_display = eglDpy;
   gl_params.egl_context = eglGetCurrentContext();
   m_plGl = pl_opengl_create(m_plLog, &gl_params);
   if (!m_plGl)
