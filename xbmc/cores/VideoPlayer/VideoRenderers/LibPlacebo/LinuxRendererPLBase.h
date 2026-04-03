@@ -366,7 +366,16 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
     m_glNoError = (ctxFlags & GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR) != 0;
   }
 #else
-  m_glNoError = false;
+  // GLES: GL_CONTEXT_FLAGS is not available. Query the EGL context attribute instead.
+  // Mesa on RPi5 (and other platforms) sets EGL_CONTEXT_OPENGL_NO_ERROR_KHR when the
+  // context is created with KHR_no_error, allowing us to skip the glGetError() drain.
+  {
+    EGLint noError = EGL_FALSE;
+    if (m_eglDisplay != EGL_NO_DISPLAY)
+      eglQueryContext(m_eglDisplay, eglGetCurrentContext(),
+                      EGL_CONTEXT_OPENGL_NO_ERROR_KHR, &noError);
+    m_glNoError = (noError == EGL_TRUE);
+  }
 #endif
 
   // Probe EGL_ANDROID_native_fence_sync + KHR_wait_sync
@@ -1536,7 +1545,11 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     qparams.pts = buf.pts - m_queuePtsOffset;
     qparams.radius = pl_frame_mix_radius(&params);
     qparams.vsync_duration = vsyncDuration;
-    qparams.timeout = 0;
+    // Allow up to 40% of a vsync period for the decoder to deliver the frame.
+    // V4L2/bcm2835-codec on RPi5 has measurable decode jitter; a zero timeout causes
+    // pl_queue_update to return PL_QUEUE_MORE on any slip, falling back to the direct
+    // pl_render_image path and losing frame-mixing / motion-compensation.
+    qparams.timeout = static_cast<uint64_t>(vsyncDuration * 0.4f * 1e9f);
 
     pl_frame_mix mix{};
     const auto status = pl_queue_update(m_plQueue, &mix, &qparams);
@@ -1556,6 +1569,13 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     if (!pl_render_image(renderer, &frameIn, &frameOut, &params))
       CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_render_image failed");
   }
+
+  // Flush the V3D TBDR binning pipeline immediately after the render pass.
+  // Without this, all tile-binning commands accumulate in the command buffer until
+  // eglSwapBuffers, causing a last-minute GPU rush that overruns the vsync deadline
+  // on Raspberry Pi 5's VideoCore V (and benefits other TBDR GPUs: Mali, Adreno, etc.).
+  // glFlush() is a CPU-side submit with no synchronisation stall; it returns immediately.
+  glFlush();
 
   // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit.
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, currentFbo);
