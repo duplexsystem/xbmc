@@ -951,14 +951,11 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   pl_opengl_wrap_params wp{};
   wp.texture = glTex;
   wp.target = GL_TEXTURE_EXTERNAL_OES;
-  GLenum drmIformat;
-  if (buf.m_srcBits > 10)
-    drmIformat = GL_RGBA16F; // 12-bit (P012) or 16-bit (P016)
-  else if (buf.m_srcBits > 8)
-    drmIformat = GL_RGB10_A2; // 10-bit (P010)
-  else
-    drmIformat = GL_RGBA8; // 8-bit (NV12)
-  wp.iformat = drmIformat;
+  // GL_TEXTURE_EXTERNAL_OES is opaque to GL — the EGL/DRM layer controls
+  // the actual pixel format internally. libplacebo cannot map format-specific
+  // ifomats (GL_RGB10_A2, GL_RGBA16F) for external OES targets. Pass GL_RGBA8
+  // for all bit depths; actual precision is carried via color metadata.
+  wp.iformat = GL_RGBA8;
   wp.width = sz.Width();
   wp.height = sz.Height();
 

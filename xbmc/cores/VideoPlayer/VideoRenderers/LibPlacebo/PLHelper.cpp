@@ -94,12 +94,6 @@ bool PL::PLInstance::Init()
     eglDpy = winEGL->GetEGLDisplay();
     eglCtx = winEGL->GetEGLContext();
   }
-  CLog::Log(LOGINFO,
-            "PLInstance::Init - winEGL={} eglDpy={} eglCtx={} "
-            "eglGetCurrentDisplay={} eglGetCurrentContext={}",
-            static_cast<void*>(winEGL), static_cast<void*>(eglDpy),
-            static_cast<void*>(eglCtx), static_cast<void*>(eglGetCurrentDisplay()),
-            static_cast<void*>(eglGetCurrentContext()));
   if (eglDpy == EGL_NO_DISPLAY)
     eglDpy = eglGetCurrentDisplay();
   if (eglCtx == EGL_NO_CONTEXT)
@@ -114,7 +108,6 @@ bool PL::PLInstance::Init()
       (eglCtx != EGL_NO_CONTEXT && eglGetCurrentContext() != eglCtx);
   if (needMakeCurrent)
   {
-    CLog::Log(LOGINFO, "PLInstance::Init - calling eglMakeCurrent");
     if (!eglMakeCurrent(eglDpy, EGL_NO_SURFACE, EGL_NO_SURFACE, eglCtx))
       CLog::Log(LOGWARNING, "PLInstance::Init - eglMakeCurrent failed: 0x{:x}", eglGetError());
   }
