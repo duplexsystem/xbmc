@@ -905,6 +905,8 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     plbuf.planes[1].flipped = true;
   }
 
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
   plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
   if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
     plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
@@ -1007,6 +1009,8 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
 
   // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
   // yielding RGB in the source primaries/transfer. Tell libplacebo this is RGB.
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
   plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
   plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
   plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
@@ -1307,6 +1311,8 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     plbuf.planes[n].flipped = true;
   }
 
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
   plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
   plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
   plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
@@ -1684,6 +1690,8 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
     }
     plbuf.planes[n] = {};
   }
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
   plbuf.num_planes = 0;
   plbuf.loaded = false;
 }
