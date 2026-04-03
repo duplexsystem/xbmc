@@ -141,6 +141,25 @@ void ApplyHdrMetadata(pl_color_space& colorSpace,
   }
 }
 
+inline void FixHdrColorSpace(pl_color_repr& colorRepr, pl_color_space& colorSpace)
+{
+  const bool isHdrTransfer =
+      colorSpace.transfer == PL_COLOR_TRC_PQ || colorSpace.transfer == PL_COLOR_TRC_HLG;
+  const bool isBt2020Primaries = colorSpace.primaries == PL_COLOR_PRIM_BT_2020;
+  if (!isHdrTransfer && !isBt2020Primaries)
+    return;
+
+  if (colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
+    colorSpace.primaries = PL_COLOR_PRIM_BT_2020;
+
+  if (pl_color_system_is_ycbcr_like(colorRepr.sys) &&
+      colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_NC &&
+      colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_C &&
+      colorRepr.sys != PL_COLOR_SYSTEM_BT_2100_PQ &&
+      colorRepr.sys != PL_COLOR_SYSTEM_BT_2100_HLG)
+    colorRepr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+}
+
 class RenderConfig
 {
 public:

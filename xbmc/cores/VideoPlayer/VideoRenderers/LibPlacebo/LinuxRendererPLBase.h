@@ -917,6 +917,16 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
 
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
+        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
+      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
+  }
+  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
+  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
+    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
   buf.loaded = true;
@@ -984,6 +994,19 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
+
+  // If the V4L2/DRMPRIME decoder didn't propagate TRC, infer it from HDR metadata.
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
+        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
+      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
+  }
+  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
+  // libplacebo v7 calls pl_raw_primaries_get inside pl_color_space_infer without
+  // checking for UNKNOWN; ensure primaries is always valid.
+  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
+    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
 
   plbuf.iFlags = buf.iFlags;
 
@@ -1264,6 +1287,17 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   plbuf.colorRepr.bits = bits;
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
+
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
+        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
+      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
+  }
+  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
+  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
+    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
   buf.loaded = true;
