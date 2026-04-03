@@ -924,8 +924,18 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
       plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
   }
   PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
+  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
+  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
   if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
     plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
+    // Anything else with an unknown TRC is treated as SDR.
+    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
+                                    ? PL_COLOR_TRC_PQ
+                                    : PL_COLOR_TRC_BT_1886;
+  }
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1003,10 +1013,20 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
       plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
   }
   PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
-  // libplacebo v7 calls pl_raw_primaries_get inside pl_color_space_infer without
-  // checking for UNKNOWN; ensure primaries is always valid.
+  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
+  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
+  // For DRMPRIME, the V4L2 decoder may not populate either field (e.g. RPi5
+  // bcm2835-codec leaves colorspace as UNSPECIFIED), so both fallbacks fire.
   if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
     plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
+    // Anything else with an unknown TRC is treated as SDR.
+    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
+                                    ? PL_COLOR_TRC_PQ
+                                    : PL_COLOR_TRC_BT_1886;
+  }
 
   plbuf.iFlags = buf.iFlags;
 
@@ -1295,8 +1315,18 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
       plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
   }
   PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
+  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
+  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
   if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
     plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
+  {
+    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
+    // Anything else with an unknown TRC is treated as SDR.
+    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
+                                    ? PL_COLOR_TRC_PQ
+                                    : PL_COLOR_TRC_BT_1886;
+  }
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
