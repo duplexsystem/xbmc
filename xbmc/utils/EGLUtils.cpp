@@ -397,16 +397,14 @@ bool CEGLContextUtils::CreateContext(CEGLAttributesVec contextAttribs)
   {
     CEGLAttributesVec noErrAttribs = contextAttribs;
     noErrAttribs.Add({{EGL_CONTEXT_OPENGL_NO_ERROR_KHR, EGL_TRUE}});
-    m_eglContext = eglCreateContext(m_eglDisplay, eglConfig,
-                                    EGL_NO_CONTEXT, noErrAttribs.Get());
+    m_eglContext = eglCreateContext(m_eglDisplay, eglConfig, EGL_NO_CONTEXT, noErrAttribs.Get());
     if (m_eglContext != EGL_NO_CONTEXT)
       CLog::Log(LOGINFO, "Created EGL no-error context");
   }
 
   if (m_eglContext == EGL_NO_CONTEXT)
   {
-    m_eglContext = eglCreateContext(m_eglDisplay, eglConfig,
-                                    EGL_NO_CONTEXT, contextAttribs.Get());
+    m_eglContext = eglCreateContext(m_eglDisplay, eglConfig, EGL_NO_CONTEXT, contextAttribs.Get());
   }
 
   if (CEGLUtils::HasExtension(m_eglDisplay, "EGL_IMG_context_priority"))

@@ -7,14 +7,14 @@
  */
 
 #include "PLHelper.h"
-
 #include "ServiceBroker.h"
 #include "utils/log.h"
 #include "windowing/WinSystem.h"
 #include "windowing/linux/WinSystemEGL.h"
 
-#include <EGL/egl.h>
 #include <libplacebo/opengl.h>
+
+#include <EGL/egl.h>
 
 bool PL::PLInstance::InitGpu()
 {
@@ -42,8 +42,7 @@ bool PL::PLInstance::InitGpu()
   // is provided in params, so the context must be bound to the calling thread.
   // This is safe: on GBM the context is surfaceless and not held by any
   // thread between render frames, so eglMakeCurrent will succeed.
-  const bool needMakeCurrent =
-      (eglCtx != EGL_NO_CONTEXT && eglGetCurrentContext() != eglCtx);
+  const bool needMakeCurrent = (eglCtx != EGL_NO_CONTEXT && eglGetCurrentContext() != eglCtx);
   if (needMakeCurrent)
   {
     if (!eglMakeCurrent(eglDpy, EGL_NO_SURFACE, EGL_NO_SURFACE, eglCtx))
@@ -56,8 +55,7 @@ bool PL::PLInstance::InitGpu()
   // Explicitly provide eglGetProcAddress so libplacebo uses EGL's function
   // loader rather than its own internal logic (which may fail to load core
   // GLES functions on some platforms, e.g. Broadcom V3D on RPi5).
-  gl_params.get_proc_addr =
-      reinterpret_cast<pl_voidfunc_t (*)(const char*)>(eglGetProcAddress);
+  gl_params.get_proc_addr = reinterpret_cast<pl_voidfunc_t (*)(const char*)>(eglGetProcAddress);
   pl_opengl plGl = pl_opengl_create(m_plLog, &gl_params);
   if (!plGl)
   {

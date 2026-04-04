@@ -26,13 +26,12 @@
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
-#include "system_gl.h"
-
-#include <libplacebo/opengl.h>
-
 #include <drm_fourcc.h>
+#include <libplacebo/opengl.h>
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
+
+#include "system_gl.h"
 
 #if defined(HAVE_LIBVA)
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
@@ -139,12 +138,12 @@ private:
     pl_dovi_metadata doviMetadata{}; ///< Owned copy; colorRepr.dovi points here when valid
     unsigned int iFlags{0}; ///< DVP_FLAG_* interlace flags
     bool loaded{false};
-    
+
     // Pending EGL sync object imported from a DMA-buf sync-file fence.
     // EGL_NO_SYNC_KHR means eglWaitSyncKHR has already been called or no sync is needed.
     // Used by both the VAAPI and DRMPRIME paths.
     EGLSyncKHR eglSyncFence{EGL_NO_SYNC_KHR};
-    
+
 #if defined(HAVE_LIBVA)
     GLuint vaapiGLTex[3]{};
     EGLImageKHR vaapiEGLImage[3]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
@@ -399,8 +398,7 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
     auto* fn = eglGetProcAddress("glEGLImageTargetTexStorageEXT");
     if (fn)
     {
-      m_glEGLImageTargetTexStorageEXT =
-          reinterpret_cast<PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC>(fn);
+      m_glEGLImageTargetTexStorageEXT = reinterpret_cast<PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC>(fn);
       m_hasEGLImageStorage = true;
     }
   }
@@ -485,8 +483,8 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   {
     EGLint noError = EGL_FALSE;
     if (m_eglDisplay != EGL_NO_DISPLAY)
-      eglQueryContext(m_eglDisplay, eglGetCurrentContext(),
-                      EGL_CONTEXT_OPENGL_NO_ERROR_KHR, &noError);
+      eglQueryContext(m_eglDisplay, eglGetCurrentContext(), EGL_CONTEXT_OPENGL_NO_ERROR_KHR,
+                      &noError);
     m_glNoError = (noError == EGL_TRUE);
   }
 #endif
@@ -890,9 +888,9 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
         syncExport.fd >= 0)
     {
-      const EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE };
+      const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
       plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-      
+
       // If EGL failed to create the sync object, we must close the fd ourselves
       if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
       {
@@ -1106,9 +1104,8 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   {
     if (UploadDRMPRIMEPlanes(index, plbuf))
       return true;
-    CLog::Log(LOGWARNING,
-              "CLinuxRendererPLBase::UploadDRMPRIME - per-plane DV import failed, "
-              "falling back to single-OES (DV reshaping will be unavailable)");
+    CLog::Log(LOGWARNING, "CLinuxRendererPLBase::UploadDRMPRIME - per-plane DV import failed, "
+                          "falling back to single-OES (DV reshaping will be unavailable)");
   }
 
   m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
@@ -1128,8 +1125,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   // The GL texture ID is stable for a given DRMPRIME slot; only the EGL image
   // behind it changes per frame, which pl_opengl_wrap doesn't interact with.
   auto& cache = m_drmTexCache[index];
-  if (cache.tex && cache.glTex == glTex && cache.width == sz.Width() &&
-      cache.height == sz.Height())
+  if (cache.tex && cache.glTex == glTex && cache.width == sz.Width() && cache.height == sz.Height())
   {
     plbuf.tex[0] = cache.tex;
   }
@@ -1217,9 +1213,10 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
       if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
           syncExport.fd >= 0)
       {
-        EGLint attribs[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE };
-        plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-        
+        EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
+        plbuf.eglSyncFence =
+            m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+
         if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
         {
           close(syncExport.fd);
@@ -1883,8 +1880,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
                                           GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alphaBits);
     glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
-                                          GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE,
-                                          &colorType);
+                                          GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &colorType);
     GLenum fboIformat;
     if (colorType == GL_FLOAT)
       fboIformat = GL_RGBA16F;

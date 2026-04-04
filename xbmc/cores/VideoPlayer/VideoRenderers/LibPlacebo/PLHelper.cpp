@@ -48,7 +48,10 @@ std::shared_ptr<PL::PLInstance> PL::PLInstance::Get()
 }
 
 PL::PLInstance::PLInstance()
-  : m_plLog(nullptr), m_plGpu(nullptr), m_plRenderer(nullptr), m_plCache(nullptr)
+  : m_plLog(nullptr),
+    m_plGpu(nullptr),
+    m_plRenderer(nullptr),
+    m_plCache(nullptr)
 {
 }
 
@@ -104,11 +107,8 @@ void PL::PLInstance::LoadCache()
     return;
 
   const int loaded = pl_cache_load_ex(
-      m_plCache,
-      [](void* priv, size_t size, void* ptr) -> bool {
-        return static_cast<XFILE::CFile*>(priv)->Read(ptr, size) ==
-               static_cast<ssize_t>(size);
-      },
+      m_plCache, [](void* priv, size_t size, void* ptr) -> bool
+      { return static_cast<XFILE::CFile*>(priv)->Read(ptr, size) == static_cast<ssize_t>(size); },
       &f);
   f.Close();
 
@@ -140,11 +140,8 @@ void PL::PLInstance::SaveCache()
   }
 
   pl_cache_save_ex(
-      m_plCache,
-      [](void* priv, size_t size, const void* ptr) {
-        static_cast<XFILE::CFile*>(priv)->Write(ptr, size);
-      },
-      &f);
+      m_plCache, [](void* priv, size_t size, const void* ptr)
+      { static_cast<XFILE::CFile*>(priv)->Write(ptr, size); }, &f);
   f.Close();
 
   CLog::Log(LOGDEBUG, "PLInstance::SaveCache - saved {} shader objects ({} bytes)",

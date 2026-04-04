@@ -623,8 +623,7 @@ void CDVDVideoCodecDRMPRIME::SetPictureParams(VideoPicture* pVideoPicture)
     AVFrameSideData* doviSd = av_frame_get_side_data(m_pFrame, AV_FRAME_DATA_DOVI_METADATA);
     if (doviSd)
     {
-      const AVDOVIMetadata* metadata =
-          reinterpret_cast<const AVDOVIMetadata*>(doviSd->buf->data);
+      const AVDOVIMetadata* metadata = reinterpret_cast<const AVDOVIMetadata*>(doviSd->buf->data);
       const AVDOVIRpuDataHeader* header = av_dovi_get_header(metadata);
       if (header && header->disable_residual_flag)
       {

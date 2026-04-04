@@ -180,8 +180,7 @@ inline void ValidateInputColorSpace(pl_color_space& colorSpace, pl_color_repr& c
 
   // Clamp out-of-range enums to UNKNOWN before inference. These originate from
   // hw decoders returning garbage values and would hit pl_unreachable() → UB.
-  if (colorSpace.primaries < PL_COLOR_PRIM_UNKNOWN ||
-      colorSpace.primaries >= PL_COLOR_PRIM_COUNT)
+  if (colorSpace.primaries < PL_COLOR_PRIM_UNKNOWN || colorSpace.primaries >= PL_COLOR_PRIM_COUNT)
     colorSpace.primaries = PL_COLOR_PRIM_UNKNOWN;
   if (colorSpace.transfer < PL_COLOR_TRC_UNKNOWN || colorSpace.transfer >= PL_COLOR_TRC_COUNT)
     colorSpace.transfer = PL_COLOR_TRC_UNKNOWN;
@@ -199,10 +198,8 @@ inline void ValidateInputColorSpace(pl_color_space& colorSpace, pl_color_repr& c
 
   // HDR YCbCr content must use a BT.2020 matrix
   if (pl_color_transfer_is_hdr(colorSpace.transfer) &&
-      pl_color_system_is_ycbcr_like(colorRepr.sys) &&
-      colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_NC &&
-      colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_C &&
-      colorRepr.sys != PL_COLOR_SYSTEM_BT_2100_PQ &&
+      pl_color_system_is_ycbcr_like(colorRepr.sys) && colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_NC &&
+      colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_C && colorRepr.sys != PL_COLOR_SYSTEM_BT_2100_PQ &&
       colorRepr.sys != PL_COLOR_SYSTEM_BT_2100_HLG)
   {
     colorRepr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
