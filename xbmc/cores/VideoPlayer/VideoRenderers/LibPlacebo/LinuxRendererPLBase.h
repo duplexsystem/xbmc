@@ -146,6 +146,21 @@ private:
   std::array<PLBuffer, NUM_BUFFERS> m_plBuffers{};
   std::array<SWBuffer, NUM_BUFFERS> m_swBuffers{};
   std::array<CDRMPRIMETexture, NUM_BUFFERS> m_drmTextures{};
+
+  // Cached pl_tex wrapper for each DRMPRIME slot.
+  // pl_opengl_wrap + pl_tex_destroy per frame costs a glGetError() stall (via
+  // gl_check_err inside libplacebo) plus mutex round-trips and heap allocation.
+  // The GL texture ID and dimensions are stable across frames for a given slot,
+  // so the wrapper can be reused. Destroyed in DeleteTexture and the destructor.
+  struct DRMTexCache
+  {
+    pl_tex tex{nullptr};
+    GLuint glTex{0};
+    int width{0};
+    int height{0};
+  };
+  std::array<DRMTexCache, NUM_BUFFERS> m_drmTexCache{};
+
   bool m_isDRMPRIME{false};
   // True when eglQueryDmaBufModifiersEXT is available: the EGL stack inserts
   // implicit DMA-buf fences at eglCreateImageKHR time, making explicit CPU or
@@ -262,6 +277,13 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
     ReleasePLBuffer(i);
     ReleaseSWBuffer(i);
   }
+  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  for (auto& cache : m_drmTexCache)
+  {
+    if (cache.tex)
+      pl_tex_destroy(gpu, &cache.tex);
+    cache = {};
+  }
   if (m_plQueue)
   {
     pl_queue_destroy(&m_plQueue);
@@ -269,7 +291,7 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
   }
   if (m_cachedFboTex)
   {
-    pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_cachedFboTex);
+    pl_tex_destroy(gpu, &m_cachedFboTex);
     m_cachedFboTex = nullptr;
   }
   m_plConfig.reset();
@@ -632,6 +654,11 @@ void CLinuxRendererPLBase<TBase>::DeleteTexture(int index)
 {
   ReleasePLBuffer(index);
   ReleaseSWBuffer(index);
+  if (m_drmTexCache[index].tex)
+  {
+    pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_drmTexCache[index].tex);
+    m_drmTexCache[index] = {};
+  }
   GLuint dummyTex = this->m_buffers[index].fields[0][0].id; // 0 == FIELD_FULL
   if (dummyTex > 0)
     glDeleteTextures(1, &dummyTex);
@@ -979,23 +1006,45 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   GLuint glTex = m_drmTextures[index].GetTexture();
   const CSizeInt sz = m_drmTextures[index].GetTextureSize();
 
-  pl_opengl_wrap_params wp{};
-  wp.texture = glTex;
-  wp.target = GL_TEXTURE_EXTERNAL_OES;
-  // GL_TEXTURE_EXTERNAL_OES is opaque to GL — the EGL/DRM layer controls
-  // the actual pixel format internally. libplacebo cannot map format-specific
-  // ifomats (GL_RGB10_A2, GL_RGBA16F) for external OES targets. Pass GL_RGBA8
-  // for all bit depths; actual precision is carried via color metadata.
-  wp.iformat = GL_RGBA8;
-  wp.width = sz.Width();
-  wp.height = sz.Height();
-
-  plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
-  if (!plbuf.tex[0])
+  // Reuse cached pl_tex wrapper when the underlying GL texture and dimensions
+  // haven't changed. pl_opengl_wrap + pl_tex_destroy cost a glGetError() stall
+  // inside libplacebo (gl_check_err), plus mutex round-trips and a heap alloc/free.
+  // The GL texture ID is stable for a given DRMPRIME slot; only the EGL image
+  // behind it changes per frame, which pl_opengl_wrap doesn't interact with.
+  auto& cache = m_drmTexCache[index];
+  if (cache.tex && cache.glTex == glTex && cache.width == sz.Width() &&
+      cache.height == sz.Height())
   {
-    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIME - pl_opengl_wrap failed");
-    m_drmTextures[index].Unmap();
-    return false;
+    plbuf.tex[0] = cache.tex;
+  }
+  else
+  {
+    if (cache.tex)
+      pl_tex_destroy(gpu, &cache.tex);
+
+    pl_opengl_wrap_params wp{};
+    wp.texture = glTex;
+    wp.target = GL_TEXTURE_EXTERNAL_OES;
+    // GL_TEXTURE_EXTERNAL_OES is opaque to GL — the EGL/DRM layer controls
+    // the actual pixel format internally. libplacebo cannot map format-specific
+    // ifomats (GL_RGB10_A2, GL_RGBA16F) for external OES targets. Pass GL_RGBA8
+    // for all bit depths; actual precision is carried via color metadata.
+    wp.iformat = GL_RGBA8;
+    wp.width = sz.Width();
+    wp.height = sz.Height();
+
+    plbuf.tex[0] = pl_opengl_wrap(gpu, &wp);
+    if (!plbuf.tex[0])
+    {
+      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIME - pl_opengl_wrap failed");
+      m_drmTextures[index].Unmap();
+      return false;
+    }
+
+    cache.tex = plbuf.tex[0];
+    cache.glTex = glTex;
+    cache.width = sz.Width();
+    cache.height = sz.Height();
   }
 
   plbuf.planes[0] = {};
@@ -1483,6 +1532,12 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
 
   pl_render_params params = m_plConfig->GetOptions()->params;
   params.border = PL_CLEAR_SKIP;
+  // Dolby Vision RPU provides explicit per-frame luminance bounds in its metadata.
+  // Libplacebo's peak detection pass is a redundant GPU sampling operation when DoVi
+  // data is present — disable it to save a full GPU pass on every DV frame.
+  if (plbuf.colorRepr.dovi != nullptr)
+    params.peak_detect_params = nullptr;
+
 
   // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
   // a pass early.  Skipped when the context was created with GL_KHR_no_error
@@ -1661,9 +1716,6 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
   }
 #endif
 
-  if (!plbuf.loaded)
-    return;
-
   // Drop any pending EGL sync object (DRMPRIME path).
   if (plbuf.eglSyncFence != EGL_NO_SYNC_KHR && m_eglDestroySyncKHR)
   {
@@ -1673,13 +1725,19 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
 
   m_drmTextures[index].Unmap();
 
+  // For DRMPRIME, the pl_tex wrapper is owned by m_drmTexCache and reused across
+  // frames (the underlying GL texture ID is stable). Don't destroy it here — just
+  // null the slot so the render pipeline won't reference a stale frame.
+  // For software-decode textures (no cache), destroy normally.
   pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
     if (plbuf.tex[n])
     {
-      pl_tex_destroy(gpu, &plbuf.tex[n]);
-      plbuf.tex[n] = nullptr;
+      if (m_isDRMPRIME && m_drmTexCache[index].tex == plbuf.tex[n])
+        plbuf.tex[n] = nullptr; // cache owns it
+      else
+        pl_tex_destroy(gpu, &plbuf.tex[n]);
     }
     plbuf.planes[n] = {};
   }

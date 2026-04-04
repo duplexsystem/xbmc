@@ -104,15 +104,24 @@ bool CDRMPRIMETexture::Map(CVideoBufferDRMPRIME* buffer)
       return false;
     }
 
-    if (!glIsTexture(m_texture))
+    if (m_texture == 0)
+    {
       glGenTextures(1, &m_texture);
+      m_texParamsSet = false;
+    }
     glBindTexture(m_textureTarget, m_texture);
-    glTexParameteri(m_textureTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(m_textureTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(m_textureTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(m_textureTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Texture parameters are immutable for GL_TEXTURE_EXTERNAL_OES and only
+    // need to be set once after glGenTextures. Skipping 4 glTexParameteri
+    // calls per frame avoids redundant GL state changes on TBDR GPUs.
+    if (!m_texParamsSet)
+    {
+      glTexParameteri(m_textureTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(m_textureTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(m_textureTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(m_textureTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      m_texParamsSet = true;
+    }
     m_eglImage->UploadImage(m_textureTarget);
-    glBindTexture(m_textureTarget, 0);
   }
 
   m_primebuffer = buffer;

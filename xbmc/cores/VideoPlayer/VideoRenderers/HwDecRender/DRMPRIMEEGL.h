@@ -42,4 +42,5 @@ protected:
   GLuint m_texture{0};
   int m_texWidth{0};
   int m_texHeight{0};
+  bool m_texParamsSet{false}; ///< GL_TEXTURE_EXTERNAL_OES params are immutable once set
 };

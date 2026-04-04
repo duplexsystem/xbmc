@@ -392,6 +392,12 @@ bool CEGLContextUtils::CreateContext(CEGLAttributesVec contextAttribs)
     contextAttribs.Add({{EGL_CONTEXT_FLAGS_KHR, EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR}});
   }
 
+  if (CEGLUtils::HasExtension(m_eglDisplay, "EGL_KHR_create_context_no_error") &&
+      !CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_openGlDebugging)
+  {
+    contextAttribs.Add({{EGL_CONTEXT_OPENGL_NO_ERROR_KHR, EGL_TRUE}});
+  }
+
   m_eglContext = eglCreateContext(m_eglDisplay, eglConfig,
                                   EGL_NO_CONTEXT, contextAttribs.Get());
 
