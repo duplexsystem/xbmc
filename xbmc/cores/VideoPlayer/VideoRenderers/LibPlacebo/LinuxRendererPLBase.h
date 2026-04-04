@@ -1100,6 +1100,15 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
+
+  // OES textures: the GPU driver already applied the YCbCr→RGB matrix when
+  // sampling.  DV reshaping curves (colorRepr.dovi) operate on YCbCr input and
+  // cannot be applied on post-conversion RGB data — doing so produces wrong
+  // colours.  Keep the DV-informed HDR metadata (luminance from RPU) for tone
+  // mapping, but force RGB system and clear the reshaping pointer.
+  plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
+  plbuf.colorRepr.dovi = nullptr;
+
   PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
