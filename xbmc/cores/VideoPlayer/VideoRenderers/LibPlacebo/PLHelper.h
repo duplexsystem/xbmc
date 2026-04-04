@@ -8,21 +8,18 @@
 
 #pragma once
 
-#include "libplacebo/colorspace.h"
-#if defined(HAS_GL) || defined(HAS_GLES)
-#include "libplacebo/opengl.h"
-#endif
 #include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderInfo.h"
-#include "libplacebo/log.h"
-#include "libplacebo/renderer.h"
-#include "libplacebo/utils/frame_queue.h"
-#include "libplacebo/utils/upload.h"
 
 #include <libplacebo/cache.h>
+#include <libplacebo/colorspace.h>
 #include <libplacebo/gpu.h>
+#include <libplacebo/log.h>
 #include <libplacebo/options.h>
+#include <libplacebo/renderer.h>
 #include <libplacebo/shaders/icc.h>
+#include <libplacebo/utils/frame_queue.h>
+#include <libplacebo/utils/upload.h>
 extern "C"
 {
 #include <libavutil/dovi_meta.h>
@@ -52,21 +49,25 @@ public:
   bool Init();
   void Reset();
 
-#if defined(HAS_GL) || defined(HAS_GLES)
-  pl_opengl GetOpenGL() { return m_plGl; }
-#endif
   pl_renderer GetRenderer() { return m_plRenderer; }
   pl_gpu GetGpu() { return m_plGpu; }
 
   pl_log m_plLog;
-#if defined(HAS_GL) || defined(HAS_GLES)
-  pl_opengl m_plGl;
-#endif
   pl_gpu m_plGpu;
   pl_renderer m_plRenderer;
   pl_cache m_plCache;
 
+  // Backend-specific GPU handle, set by InitGpu(). Backends that need to
+  // expose their native handle (e.g. pl_opengl for GL texture wrapping)
+  // can store it here as an opaque pointer and cast in the backend renderer.
+  void* m_nativeGpuHandle{nullptr};
+
 private:
+  // Backend-specific GPU creation/destruction, implemented per-backend
+  // (PLInstanceGL.cpp for OpenGL/EGL, future PLInstanceVK.cpp for Vulkan, etc.)
+  bool InitGpu();
+  void DestroyGpu();
+
   void LoadCache();
   void SaveCache();
 

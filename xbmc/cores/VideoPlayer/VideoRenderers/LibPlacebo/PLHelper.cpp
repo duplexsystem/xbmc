@@ -15,15 +15,6 @@
 #include "settings/SettingsComponent.h"
 #include "utils/log.h"
 
-#if defined(HAS_GL) || defined(HAS_GLES)
-#include "windowing/WinSystem.h"
-#include "windowing/linux/WinSystemEGL.h"
-
-#include <EGL/egl.h>
-
-#include <memory>
-#endif
-
 static void pl_log_cb(void*, enum pl_log_level level, const char* msg)
 {
   switch (level)
@@ -33,7 +24,6 @@ static void pl_log_cb(void*, enum pl_log_level level, const char* msg)
       break;
     case PL_LOG_ERR:
       CLog::Log(LOGERROR, "libPlacebo Error: {}", msg);
-
       break;
     case PL_LOG_WARN:
       CLog::Log(LOGWARNING, "libPlacebo Warning: {}", msg);
@@ -58,13 +48,7 @@ std::shared_ptr<PL::PLInstance> PL::PLInstance::Get()
 }
 
 PL::PLInstance::PLInstance()
-  : m_plLog(nullptr),
-#if defined(HAS_GL) || defined(HAS_GLES)
-    m_plGl(nullptr),
-#endif
-    m_plGpu(nullptr),
-    m_plRenderer(nullptr),
-    m_plCache(nullptr)
+  : m_plLog(nullptr), m_plGpu(nullptr), m_plRenderer(nullptr), m_plCache(nullptr)
 {
 }
 
@@ -79,58 +63,9 @@ bool PL::PLInstance::Init()
   log_param.log_cb = pl_log_cb;
   log_param.log_level = PL_LOG_DEBUG;
   m_plLog = pl_log_create(PL_API_VER, &log_param);
-#if defined(HAS_GL) || defined(HAS_GLES)
-  // On GBM (RPi5), eglGetCurrentDisplay/Context() can return EGL_NO_*
-  // because the platform display is obtained via eglGetPlatformDisplay()
-  // and with DRMPRIME direct-to-plane the GLES context may never be made
-  // current on this thread.  Pull display and context from the windowing
-  // system directly, falling back to the EGL thread-local getters.
-  EGLDisplay eglDpy = EGL_NO_DISPLAY;
-  EGLContext eglCtx = EGL_NO_CONTEXT;
-  auto* winEGL =
-      dynamic_cast<KODI::WINDOWING::LINUX::CWinSystemEGL*>(CServiceBroker::GetWinSystem());
-  if (winEGL)
-  {
-    eglDpy = winEGL->GetEGLDisplay();
-    eglCtx = winEGL->GetEGLContext();
-  }
-  if (eglDpy == EGL_NO_DISPLAY)
-    eglDpy = eglGetCurrentDisplay();
-  if (eglCtx == EGL_NO_CONTEXT)
-    eglCtx = eglGetCurrentContext();
 
-  // If the context is not current on this thread, make it current now.
-  // libplacebo calls eglGetCurrentContext() internally even when egl_context
-  // is provided in params, so the context must be bound to the calling thread.
-  // This is safe: on GBM the context is surfaceless and not held by any
-  // thread between render frames, so eglMakeCurrent will succeed.
-  const bool needMakeCurrent =
-      (eglCtx != EGL_NO_CONTEXT && eglGetCurrentContext() != eglCtx);
-  if (needMakeCurrent)
-  {
-    if (!eglMakeCurrent(eglDpy, EGL_NO_SURFACE, EGL_NO_SURFACE, eglCtx))
-      CLog::Log(LOGWARNING, "PLInstance::Init - eglMakeCurrent failed: 0x{:x}", eglGetError());
-  }
-
-  pl_opengl_params gl_params = pl_opengl_default_params;
-  gl_params.egl_display = eglDpy;
-  gl_params.egl_context = eglCtx;
-  // Explicitly provide eglGetProcAddress so libplacebo uses EGL's function
-  // loader rather than its own internal logic (which may fail to load core
-  // GLES functions on some platforms, e.g. Broadcom V3D on RPi5).
-  gl_params.get_proc_addr =
-      reinterpret_cast<pl_voidfunc_t (*)(const char*)>(eglGetProcAddress);
-  m_plGl = pl_opengl_create(m_plLog, &gl_params);
-  if (!m_plGl)
-  {
-    CLog::Log(LOGERROR, "PLInstance::Init - failed to create libplacebo OpenGL context");
+  if (!InitGpu())
     return false;
-  }
-  m_plGpu = m_plGl->gpu;
-#else
-  CLog::Log(LOGERROR, "PLInstance::Init - no libplacebo backend enabled");
-  return false;
-#endif
 
   // Create shader cache, load any previously-saved entries, then attach to the
   // GPU before the renderer is created so shader compilation can be cached.
@@ -153,10 +88,7 @@ void PL::PLInstance::Reset()
     pl_renderer_destroy(&m_plRenderer);
     SaveCache();
     pl_cache_destroy(&m_plCache);
-#if defined(HAS_GL) || defined(HAS_GLES)
-    if (m_plGl)
-      pl_opengl_destroy(&m_plGl);
-#endif
+    DestroyGpu();
     pl_log_destroy(&m_plLog);
     m_isInitialized = false;
   }

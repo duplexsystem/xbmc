@@ -28,6 +28,8 @@
 
 #include "system_gl.h"
 
+#include <libplacebo/opengl.h>
+
 #if defined(HAVE_LIBVA)
 #include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
 
@@ -525,6 +527,11 @@ bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   out->repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(out, r->m_chromaLocation);
   out->rotation = PL::RotationFromOrientation(r->m_renderOrientation);
+
+  // Set source crop so zoom/stretch/pixel ratio affect the source region.
+  CRect srcRect, dstRect, viewRect;
+  r->GetVideoRect(srcRect, dstRect, viewRect);
+  out->crop = {srcRect.x1, srcRect.y1, srcRect.x2, srcRect.y2};
 
   // pl_queue sets out->field after map() returns based on first_field splitting.
   out->field = PL_FIELD_NONE;
@@ -1043,6 +1050,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.planes[0].component_mapping[1] = PL_CHANNEL_G;
   plbuf.planes[0].component_mapping[2] = PL_CHANNEL_B;
   plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  plbuf.planes[0].flipped = true; // DMA-buf row 0 = top of video, GL texcoord t=0 = bottom
   plbuf.num_planes = 1;
 
   // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
@@ -1375,6 +1383,11 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
 
   CRect src, dst, view;
   this->GetVideoRect(src, dst, view);
+
+  // Source crop: tells libplacebo which region of the video texture to display.
+  // Without this, zoom, pixel ratio, and stretch features have no effect on the
+  // source side — the entire texture is always rendered into the destination rect.
+  frameIn.crop = {src.x1, src.y1, src.x2, src.y2};
   int viewW = static_cast<int>(view.Width());
   int viewH = static_cast<int>(view.Height());
   if (viewW <= 0 || viewH <= 0)
