@@ -510,5 +510,20 @@ CHDRCapabilities CWinSystemGbm::GetDisplayHDRCapabilities() const
   if (m_info->SupportsEOTF(UTILS::Eotf::HLG))
     caps.SetHLG();
 
+  caps.SetDisplayMaxLuminance(m_info->GetDesiredContentMaxLuminance());
+  caps.SetDisplayMinLuminance(m_info->GetDesiredContentMinLuminance());
+  caps.SetDisplayMaxFrameAvgLuminance(m_info->GetDesiredContentMaxFrameAvgLuminance());
+
   return caps;
+}
+
+float CWinSystemGbm::GetGuiSdrPeakLuminance() const
+{
+  if (m_info)
+  {
+    float avg = m_info->GetDesiredContentMaxFrameAvgLuminance();
+    if (avg > 0.0f)
+      return avg;
+  }
+  return 203.0f;
 }

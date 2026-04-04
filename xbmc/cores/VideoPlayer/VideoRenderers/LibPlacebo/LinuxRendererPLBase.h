@@ -21,6 +21,7 @@
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
 #include "filesystem/File.h"
 #include "settings/Settings.h"
+#include "utils/HDRCapabilities.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
@@ -181,6 +182,7 @@ private:
   pl_color_space m_colorSpace{};
   pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
   std::unique_ptr<PL::RenderConfig> m_plConfig;
+  CHDRCapabilities m_displayHDRCaps;
 
   struct QueuedFrameState
   {
@@ -356,6 +358,12 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   }
   m_queuePtsOffsetSet = false;
 
+  // Cache display HDR capabilities for use in RenderHook (avoids per-frame allocation).
+  if (this->m_passthroughHDR)
+    m_displayHDRCaps = CServiceBroker::GetWinSystem()->GetDisplayHDRCapabilities();
+  else
+    m_displayHDRCaps = {};
+
   // Invalidate CMS state: source primaries may have changed and we are about
   // to render a new video source.
   m_plConfig->ResetCmsState();
@@ -514,7 +522,6 @@ bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   for (int n = 0; n < plbuf.num_planes; ++n)
     out->planes[n] = plbuf.planes[n];
   out->color = plbuf.colorSpace;
-  PL::SanitizeColorSpace(out->color);
   out->repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(out, r->m_chromaLocation);
   out->rotation = PL::RotationFromOrientation(r->m_renderOrientation);
@@ -955,27 +962,7 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   }
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
-
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
-        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
-      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
-  }
-  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
-  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
-  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
-  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
-    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
-    // Anything else with an unknown TRC is treated as SDR.
-    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
-                                    ? PL_COLOR_TRC_PQ
-                                    : PL_COLOR_TRC_BT_1886;
-  }
-  PL::SanitizeColorSpace(plbuf.colorSpace);
+  PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1068,30 +1055,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
-
-  // If the V4L2/DRMPRIME decoder didn't propagate TRC, infer it from HDR metadata.
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
-        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
-      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
-  }
-  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
-  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
-  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
-  // For DRMPRIME, the V4L2 decoder may not populate either field (e.g. RPi5
-  // bcm2835-codec leaves colorspace as UNSPECIFIED), so both fallbacks fire.
-  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
-    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
-    // Anything else with an unknown TRC is treated as SDR.
-    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
-                                    ? PL_COLOR_TRC_PQ
-                                    : PL_COLOR_TRC_BT_1886;
-  }
-  PL::SanitizeColorSpace(plbuf.colorSpace);
+  PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
 
@@ -1374,27 +1338,7 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   plbuf.colorRepr.bits = bits;
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
-
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    if (buf.hasLightMetadata || buf.hasDisplayMetadata ||
-        !pl_hdr_metadata_equal(&buf.plColorSpace.hdr, &pl_hdr_metadata_empty))
-      plbuf.colorSpace.transfer = PL_COLOR_TRC_PQ;
-  }
-  PL::FixHdrColorSpace(plbuf.colorRepr, plbuf.colorSpace);
-  // libplacebo v7 crashes in pl_color_space_infer if primaries or transfer is
-  // UNKNOWN; ensure both are always valid before handing to pl_render_image.
-  if (plbuf.colorSpace.primaries == PL_COLOR_PRIM_UNKNOWN)
-    plbuf.colorSpace.primaries = PL_COLOR_PRIM_BT_709;
-  if (plbuf.colorSpace.transfer == PL_COLOR_TRC_UNKNOWN)
-  {
-    // BT.2020 primaries without an explicit TRC are almost certainly HDR/PQ.
-    // Anything else with an unknown TRC is treated as SDR.
-    plbuf.colorSpace.transfer = (plbuf.colorSpace.primaries == PL_COLOR_PRIM_BT_2020)
-                                    ? PL_COLOR_TRC_PQ
-                                    : PL_COLOR_TRC_BT_1886;
-  }
-  PL::SanitizeColorSpace(plbuf.colorSpace);
+  PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1423,7 +1367,6 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   for (int n = 0; n < plbuf.num_planes; ++n)
     frameIn.planes[n] = plbuf.planes[n];
   frameIn.color = plbuf.colorSpace;
-  PL::SanitizeColorSpace(frameIn.color);
   frameIn.repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 
@@ -1504,29 +1447,31 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
     frameOut.color.transfer =
         (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67) ? PL_COLOR_TRC_HLG : PL_COLOR_TRC_PQ;
+
+    // Set the display's actual peak luminance from EDID so libplacebo knows
+    // the output capability. Without this, max_luma=0 causes libplacebo to
+    // infer 203 nits (PL_COLOR_SDR_WHITE) via pl_color_transfer_nominal_peak
+    // and tone-map all HDR content down to SDR levels.
+    if (m_displayHDRCaps.GetDisplayMaxLuminance() > 0.0f)
+    {
+      frameOut.color.hdr.max_luma = m_displayHDRCaps.GetDisplayMaxLuminance();
+      if (m_displayHDRCaps.GetDisplayMinLuminance() > 0.0f)
+        frameOut.color.hdr.min_luma = m_displayHDRCaps.GetDisplayMinLuminance();
+    }
   }
   else
   {
     frameOut.color.primaries = PL_COLOR_PRIM_BT_709;
     frameOut.color.transfer = PL_COLOR_TRC_BT_1886;
-  }
-  frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
-  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
-                                                                           : PL_COLOR_LEVELS_FULL;
 
-  // SDR display peak luminance — only set for SDR output (BT.1886 / non-passthrough).
-  // In passthrough HDR mode the output transfer is PQ/HLG and libplacebo is writing
-  // the full HDR signal; setting max_luma to the SDR peak (200-400 cd/m²) would
-  // incorrectly cause libplacebo to tone-map 1000-nit HDR into that narrow window,
-  // compressing saturated out-of-gamut colours (blues, reds, yellows) against the
-  // ceiling and making them look blown out.  For passthrough, leave max_luma = 0 so
-  // libplacebo uses the content's own metadata for any intra-format scaling.
-  if (!this->m_passthroughHDR)
-  {
+    // SDR display peak luminance for tone-mapping HDR→SDR output.
     const float peakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
     if (peakLuminance > 0.0f)
       frameOut.color.hdr.max_luma = peakLuminance;
   }
+  frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
+  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
+                                                                           : PL_COLOR_LEVELS_FULL;
 
   // CMS (ICC profile / 3D LUT) is SDR colour management.  Do not apply it when
   // the output frame is in HDR passthrough mode (PQ/HLG transfer) — libplacebo

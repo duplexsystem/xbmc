@@ -62,6 +62,7 @@ public:
   bool SetHDR(const VideoPicture* videoPicture) override;
   bool IsHDRDisplay() override;
   CHDRCapabilities GetDisplayHDRCapabilities() const override;
+  float GetGuiSdrPeakLuminance() const override;
 
   std::shared_ptr<CVideoLayerBridge> GetVideoLayerBridge() const { return m_videoLayerBridge; }
   void RegisterVideoLayerBridge(std::shared_ptr<CVideoLayerBridge> bridge)
