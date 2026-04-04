@@ -1576,13 +1576,6 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
       CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_render_image failed");
   }
 
-  // Flush the V3D TBDR binning pipeline immediately after the render pass.
-  // Without this, all tile-binning commands accumulate in the command buffer until
-  // eglSwapBuffers, causing a last-minute GPU rush that overruns the vsync deadline
-  // on Raspberry Pi 5's VideoCore V (and benefits other TBDR GPUs: Mali, Adreno, etc.).
-  // glFlush() is a CPU-side submit with no synchronisation stall; it returns immediately.
-  glFlush();
-
   // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit.
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, currentFbo);
   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
