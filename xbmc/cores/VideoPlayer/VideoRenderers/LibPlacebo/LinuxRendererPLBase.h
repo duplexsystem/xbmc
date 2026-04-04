@@ -514,6 +514,7 @@ bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   for (int n = 0; n < plbuf.num_planes; ++n)
     out->planes[n] = plbuf.planes[n];
   out->color = plbuf.colorSpace;
+  PL::SanitizeColorSpace(out->color);
   out->repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(out, r->m_chromaLocation);
   out->rotation = PL::RotationFromOrientation(r->m_renderOrientation);
@@ -974,6 +975,7 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
                                     ? PL_COLOR_TRC_PQ
                                     : PL_COLOR_TRC_BT_1886;
   }
+  PL::SanitizeColorSpace(plbuf.colorSpace);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1089,6 +1091,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
                                     ? PL_COLOR_TRC_PQ
                                     : PL_COLOR_TRC_BT_1886;
   }
+  PL::SanitizeColorSpace(plbuf.colorSpace);
 
   plbuf.iFlags = buf.iFlags;
 
@@ -1391,6 +1394,7 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
                                     ? PL_COLOR_TRC_PQ
                                     : PL_COLOR_TRC_BT_1886;
   }
+  PL::SanitizeColorSpace(plbuf.colorSpace);
 
   plbuf.iFlags = buf.iFlags;
   plbuf.loaded = true;
@@ -1419,6 +1423,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   for (int n = 0; n < plbuf.num_planes; ++n)
     frameIn.planes[n] = plbuf.planes[n];
   frameIn.color = plbuf.colorSpace;
+  PL::SanitizeColorSpace(frameIn.color);
   frameIn.repr = plbuf.colorRepr;
   pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
 

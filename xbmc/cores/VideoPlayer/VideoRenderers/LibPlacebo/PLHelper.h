@@ -141,6 +141,21 @@ void ApplyHdrMetadata(pl_color_space& colorSpace,
   }
 }
 
+// Clamp transfer and primaries to valid libplacebo enum ranges.
+// pl_color_transfer_nominal_peak uses __builtin_unreachable() for out-of-range
+// values, which on ARM64 manifests as SIGSEGV. This guards against corrupt
+// values from uninitialised memory, unexpected FFmpeg enum mappings, or stale
+// buffers across renderer re-init.
+inline void SanitizeColorSpace(pl_color_space& colorSpace)
+{
+  if (colorSpace.primaries <= PL_COLOR_PRIM_UNKNOWN ||
+      colorSpace.primaries >= PL_COLOR_PRIM_COUNT)
+    colorSpace.primaries = PL_COLOR_PRIM_BT_709;
+  if (colorSpace.transfer <= PL_COLOR_TRC_UNKNOWN ||
+      colorSpace.transfer >= PL_COLOR_TRC_COUNT)
+    colorSpace.transfer = PL_COLOR_TRC_BT_1886;
+}
+
 inline void FixHdrColorSpace(pl_color_repr& colorRepr, pl_color_space& colorSpace)
 {
   const bool isHdrTransfer =
