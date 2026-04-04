@@ -186,6 +186,12 @@ private:
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
 #endif
 
+  // GL_EXT_EGL_image_storage: immutable-format texture from EGLImage.
+  // The driver can skip per-frame format validation and pre-compute tiling
+  // metadata, reducing CPU overhead on tile-based GPUs (V3D/RPi5, Mali, etc.).
+  PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC m_glEGLImageTargetTexStorageEXT{nullptr};
+  bool m_hasEGLImageStorage{false};
+
   AVPixelFormat m_format{AV_PIX_FMT_NONE};
   pl_color_space m_colorSpace{};
   pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
@@ -336,6 +342,18 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   // DMA-buf reservation fence to the EGLImage so the GPU waits automatically —
   // no explicit CPU stall or explicit sync is needed.
   m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
+
+  // Probe GL_EXT_EGL_image_storage: immutable-format texture from EGLImage.
+  // Avoids per-frame format validation overhead vs glEGLImageTargetTexture2DOES.
+  {
+    auto* fn = eglGetProcAddress("glEGLImageTargetTexStorageEXT");
+    if (fn)
+    {
+      m_glEGLImageTargetTexStorageEXT =
+          reinterpret_cast<PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC>(fn);
+      m_hasEGLImageStorage = true;
+    }
+  }
 
 #if defined(HAVE_LIBVA)
   m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
@@ -879,9 +897,10 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     glTexParameteri(vaapiTexTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
-    // No glBindTexture(0) unbind needed: pl_opengl_wrap (called below) manages
-    // the texture binding itself, and leaving a texture bound is harmless here.
+    if (m_hasEGLImageStorage)
+      m_glEGLImageTargetTexStorageEXT(vaapiTexTarget, eglImage, nullptr);
+    else
+      m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
 
     GLenum glIformat = 0;
     switch (layer.drm_format)
