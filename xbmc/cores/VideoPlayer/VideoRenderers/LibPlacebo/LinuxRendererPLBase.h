@@ -67,6 +67,12 @@ extern "C"
 #ifndef GL_RGBA16
 #define GL_RGBA16 0x805B
 #endif
+#ifndef GL_UNSIGNED_NORMALIZED
+#define GL_UNSIGNED_NORMALIZED 0x8C17
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE
+#define GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE 0x8211
+#endif
 
 /**
  * @brief CRTP mixin providing the shared libplacebo renderer implementation.
@@ -892,6 +898,18 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
       case DRM_FORMAT_GR1616:
         glIformat = GL_RG16;
         break;
+      case DRM_FORMAT_ABGR8888:
+      case DRM_FORMAT_XBGR8888:
+        glIformat = GL_RGBA8;
+        break;
+#ifdef DRM_FORMAT_P030
+      case DRM_FORMAT_P030:
+        // 10-bit packed: 3x10-bit components in 32-bit word. Map as R16/RG16
+        // so libplacebo sees the correct container width; actual bit depth is
+        // conveyed via pl_bit_encoding.
+        glIformat = (i == 0) ? GL_R16 : GL_RG16;
+        break;
+#endif
       default:
         CLog::Log(LOGERROR,
                   "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
@@ -1413,13 +1431,22 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     // unnecessarily before the compositor receives the frame.
     GLenum attachment = (fboId == 0) ? GL_BACK : GL_COLOR_ATTACHMENT0;
     GLint redBits = 8;
+    GLint alphaBits = 8;
+    GLint colorType = GL_UNSIGNED_NORMALIZED;
     glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
                                           GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &redBits);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
+                                          GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alphaBits);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
+                                          GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE,
+                                          &colorType);
     GLenum fboIformat;
-    if (redBits > 10)
+    if (colorType == GL_FLOAT)
       fboIformat = GL_RGBA16F;
-    else if (redBits > 8)
+    else if (redBits > 8 && alphaBits <= 2)
       fboIformat = GL_RGB10_A2;
+    else if (redBits > 8)
+      fboIformat = GL_RGBA16;
     else
       fboIformat = GL_RGBA8;
 
