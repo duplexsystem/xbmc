@@ -30,12 +30,13 @@
 
 #include <libplacebo/opengl.h>
 
-#if defined(HAVE_LIBVA)
-#include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
-
 #include <drm_fourcc.h>
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
+
+#if defined(HAVE_LIBVA)
+#include "cores/VideoPlayer/DVDCodecs/Video/VAAPI.h"
+
 #include <va/va_drmcommon.h>
 #endif // HAVE_LIBVA
 
@@ -150,6 +151,11 @@ private:
     int vaapiExportedFd[4]{-1, -1, -1, -1};
     int vaapiNumFds{0};
 #endif
+
+    // Set when the per-plane DV import path was used for this frame.
+    // ReleasePLBuffer uses this to skip CDRMPRIMETexture::Unmap (not used)
+    // and to null the pl_tex slots without destroying them (cache owns them).
+    bool usedPerPlaneImport{false};
   };
 
   std::array<PLBuffer, NUM_BUFFERS> m_plBuffers{};
@@ -170,6 +176,26 @@ private:
   };
   std::array<DRMTexCache, NUM_BUFFERS> m_drmTexCache{};
 
+  // Persistent per-slot cache for the per-plane DRMPRIME DV path.
+  // GL textures and pl_tex wrappers are created once (dimensions are stable for
+  // the entire video) and reused across frames.  Only the EGLImages change per
+  // frame — glEGLImageTargetTexture2DOES rebinds the existing GL texture to the
+  // new EGLImage, avoiding glGenTextures/glDeleteTextures/glTexParameteri/
+  // pl_opengl_wrap/pl_tex_destroy overhead (the last two cause glGetError stalls
+  // on tile-based GPUs).
+  struct DRMPlaneCache
+  {
+    static constexpr int MAX_PLANES = 3;
+    pl_tex plTex[MAX_PLANES]{};
+    GLuint glTex[MAX_PLANES]{};
+    EGLImageKHR eglImage[MAX_PLANES]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
+    int width[MAX_PLANES]{};
+    int height[MAX_PLANES]{};
+    int numPlanes{0};
+    bool initialized{false};
+  };
+  std::array<DRMPlaneCache, NUM_BUFFERS> m_drmPlaneCache{};
+
   bool m_isDRMPRIME{false};
   // True when eglQueryDmaBufModifiersEXT is available: the EGL stack inserts
   // implicit DMA-buf fences at eglCreateImageKHR time, making explicit CPU or
@@ -181,10 +207,13 @@ private:
 
 #if defined(HAVE_LIBVA)
   bool m_isVAAPI{false};
+#endif
+
+  // EGL interop for per-plane DMA-buf import (VAAPI + DRMPRIME DV path).
+  // Probed in Configure() when either VAAPI or DRMPRIME is detected.
   PFNEGLCREATEIMAGEKHRPROC m_eglCreateImageKHR{nullptr};
   PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR{nullptr};
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
-#endif
 
   // GL_EXT_EGL_image_storage: immutable-format texture from EGLImage.
   // The driver can skip per-frame format validation and pre-compute tiling
@@ -258,7 +287,15 @@ private:
 
   bool UploadVAAPI(int index, PLBuffer& plbuf);
   bool UploadDRMPRIME(int index, PLBuffer& plbuf);
+  bool UploadDRMPRIMEPlanes(int index, PLBuffer& plbuf);
   bool UploadSoftware(int index, PLBuffer& plbuf);
+
+  // Maps combined DRM multi-plane formats to per-plane single-component formats.
+  // Returns false if the format can't be split (single-plane or unknown).
+  static bool SplitDrmFormat(uint32_t layerFormat,
+                             int numPlanes,
+                             uint32_t (&planeFormats)[3],
+                             GLenum (&glIformats)[3]);
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -299,6 +336,19 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
     if (cache.tex)
       pl_tex_destroy(gpu, &cache.tex);
     cache = {};
+  }
+  for (auto& pc : m_drmPlaneCache)
+  {
+    for (int n = 0; n < pc.numPlanes; ++n)
+    {
+      if (pc.plTex[n])
+        pl_tex_destroy(gpu, &pc.plTex[n]);
+      if (pc.eglImage[n] != EGL_NO_IMAGE_KHR)
+        m_eglDestroyImageKHR(m_eglDisplay, pc.eglImage[n]);
+    }
+    if (pc.numPlanes > 0)
+      glDeleteTextures(pc.numPlanes, pc.glTex);
+    pc = {};
   }
   if (m_plQueue)
   {
@@ -357,7 +407,16 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
 #if defined(HAVE_LIBVA)
   m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
-  if (m_isVAAPI)
+#endif
+
+  m_isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(picture.videoBuffer) != nullptr);
+
+  // Probe EGL interop functions shared by VAAPI and DRMPRIME per-plane (DV) paths.
+  if (m_isDRMPRIME
+#if defined(HAVE_LIBVA)
+      || m_isVAAPI
+#endif
+  )
   {
     m_eglCreateImageKHR =
         reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
@@ -366,9 +425,7 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
     m_glEGLImageTargetTexture2DOES = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
         eglGetProcAddress("glEGLImageTargetTexture2DOES"));
   }
-#endif
 
-  m_isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(picture.videoBuffer) != nullptr);
   if (m_isDRMPRIME)
   {
     const EGLDisplay eglDpy = GetDRMPRIMEEGLDisplay();
@@ -697,6 +754,20 @@ void CLinuxRendererPLBase<TBase>::DeleteTexture(int index)
   {
     pl_tex_destroy(PL::PLInstance::Get()->m_plGpu, &m_drmTexCache[index].tex);
     m_drmTexCache[index] = {};
+  }
+  {
+    auto& pc = m_drmPlaneCache[index];
+    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+    for (int n = 0; n < pc.numPlanes; ++n)
+    {
+      if (pc.plTex[n])
+        pl_tex_destroy(gpu, &pc.plTex[n]);
+      if (pc.eglImage[n] != EGL_NO_IMAGE_KHR)
+        m_eglDestroyImageKHR(m_eglDisplay, pc.eglImage[n]);
+    }
+    if (pc.numPlanes > 0)
+      glDeleteTextures(pc.numPlanes, pc.glTex);
+    pc = {};
   }
   GLuint dummyTex = this->m_buffers[index].fields[0][0].id; // 0 == FIELD_FULL
   if (dummyTex > 0)
@@ -1028,6 +1099,18 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   if (!drmBuf)
     return false;
 
+  // DV content: per-plane import for full RPU reshaping in libplacebo.
+  // Requires EGL interop and that the DRM format can be split into single-
+  // component planes. Falls through to the fast single-OES path on failure.
+  if (buf.plColorRepr.dovi != nullptr && m_eglCreateImageKHR)
+  {
+    if (UploadDRMPRIMEPlanes(index, plbuf))
+      return true;
+    CLog::Log(LOGWARNING,
+              "CLinuxRendererPLBase::UploadDRMPRIME - per-plane DV import failed, "
+              "falling back to single-OES (DV reshaping will be unavailable)");
+  }
+
   m_drmTextures[index].Unmap(); // defensive — no-op if not mapped
   if (!m_drmTextures[index].Map(drmBuf))
   {
@@ -1146,6 +1229,340 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   }
 #endif
 
+  plbuf.loaded = true;
+  buf.loaded = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// SplitDrmFormat — map combined DRM multi-plane formats to per-plane formats
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+bool CLinuxRendererPLBase<TBase>::SplitDrmFormat(uint32_t layerFormat,
+                                                 int numPlanes,
+                                                 uint32_t (&planeFormats)[3],
+                                                 GLenum (&glIformats)[3])
+{
+  if (numPlanes < 2)
+    return false;
+  switch (layerFormat)
+  {
+    case DRM_FORMAT_NV12:
+    case DRM_FORMAT_NV16:
+      planeFormats[0] = DRM_FORMAT_R8;
+      glIformats[0] = GL_R8;
+      planeFormats[1] = DRM_FORMAT_GR88;
+      glIformats[1] = GL_RG8;
+      return true;
+    case DRM_FORMAT_P010:
+    case DRM_FORMAT_P210:
+#ifdef DRM_FORMAT_P030
+    case DRM_FORMAT_P030:
+#endif
+      planeFormats[0] = DRM_FORMAT_R16;
+      glIformats[0] = GL_R16;
+      planeFormats[1] = DRM_FORMAT_GR1616;
+      glIformats[1] = GL_RG16;
+      return true;
+    case DRM_FORMAT_YUV420:
+      planeFormats[0] = DRM_FORMAT_R8;
+      glIformats[0] = GL_R8;
+      planeFormats[1] = DRM_FORMAT_R8;
+      glIformats[1] = GL_R8;
+      planeFormats[2] = DRM_FORMAT_R8;
+      glIformats[2] = GL_R8;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UploadDRMPRIMEPlanes — per-plane DMA-buf import for Dolby Vision content
+// ---------------------------------------------------------------------------
+//
+// Imports each YCbCr plane of the DMA-buf as a separate EGLImage → GL texture
+// → pl_tex, giving libplacebo raw plane access so DV RPU reshaping curves can
+// be applied in the shader.  Mirrors the VAAPI upload logic but reads from
+// AVDRMFrameDescriptor instead of VADRMPRIMESurfaceDescriptor.
+
+template<typename TBase>
+bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbuf)
+{
+  auto& buf = this->m_buffers[index];
+  auto* drmBuf = dynamic_cast<CVideoBufferDRMPRIME*>(buf.videoBuffer);
+  if (!drmBuf)
+    return false;
+
+  if (!drmBuf->AcquireDescriptor())
+  {
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - AcquireDescriptor failed");
+    return false;
+  }
+
+  AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
+  if (!desc || desc->nb_layers == 0)
+  {
+    CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - no layers in descriptor");
+    drmBuf->ReleaseDescriptor();
+    return false;
+  }
+
+  AVDRMLayerDescriptor* layer = &desc->layers[0];
+  const int numPlanes = layer->nb_planes;
+  const int fullW = static_cast<int>(drmBuf->GetWidth());
+  const int fullH = static_cast<int>(drmBuf->GetHeight());
+
+  uint32_t planeFormats[3]{};
+  GLenum glIformats[3]{};
+  if (!SplitDrmFormat(layer->format, numPlanes, planeFormats, glIformats))
+  {
+    CLog::Log(LOGERROR,
+              "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - unsupported DRM format 0x{:x} "
+              "with {} planes, falling back to OES path",
+              layer->format, numPlanes);
+    drmBuf->ReleaseDescriptor();
+    return false;
+  }
+
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  // Use GL_TEXTURE_2D for per-plane single-component textures.
+  // Unlike the combined OES path, single-plane DRM formats (R8, GR88, etc.)
+  // are not opaque — they map directly to standard GL internal formats.
+  const GLenum texTarget = GL_TEXTURE_2D;
+  DRMPlaneCache& cache = m_drmPlaneCache[index];
+  bool success = true;
+
+  // Compute per-plane dimensions (stable for the lifetime of the video).
+  int planeW[DRMPlaneCache::MAX_PLANES]{};
+  int planeH[DRMPlaneCache::MAX_PLANES]{};
+  for (int i = 0; i < numPlanes; ++i)
+  {
+    if (i == 0)
+    {
+      planeW[i] = fullW;
+      planeH[i] = fullH;
+    }
+    else
+    {
+      planeW[i] = (fullW + 1) / 2;
+      // 4:2:2 formats: chroma height = full height
+      if (layer->format == DRM_FORMAT_NV16 || layer->format == DRM_FORMAT_P210)
+        planeH[i] = fullH;
+      else
+        planeH[i] = (fullH + 1) / 2;
+    }
+  }
+
+  const bool firstFrame = !cache.initialized;
+  if (firstFrame)
+    glGenTextures(numPlanes, cache.glTex);
+
+  for (int i = 0; i < numPlanes && success; ++i)
+  {
+    // Destroy the previous frame's EGLImage (no-op on first frame)
+    if (cache.eglImage[i] != EGL_NO_IMAGE_KHR)
+    {
+      m_eglDestroyImageKHR(m_eglDisplay, cache.eglImage[i]);
+      cache.eglImage[i] = EGL_NO_IMAGE_KHR;
+    }
+
+    const auto& obj = desc->objects[layer->planes[i].object_index];
+
+    // Build EGL attribs: single plane per image (PLANE0 attributes only)
+    static constexpr int kMaxAttribs = 6 * 2 + 2 * 2 + 1;
+    EGLint attribs[kMaxAttribs];
+    EGLint* a = attribs;
+    *a++ = EGL_LINUX_DRM_FOURCC_EXT;
+    *a++ = static_cast<EGLint>(planeFormats[i]);
+    *a++ = EGL_WIDTH;
+    *a++ = static_cast<EGLint>(planeW[i]);
+    *a++ = EGL_HEIGHT;
+    *a++ = static_cast<EGLint>(planeH[i]);
+    *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
+    *a++ = obj.fd;
+    *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+    *a++ = static_cast<EGLint>(layer->planes[i].offset);
+    *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+    *a++ = static_cast<EGLint>(layer->planes[i].pitch);
+    if (m_hasEGLModifiers && obj.format_modifier != DRM_FORMAT_MOD_INVALID)
+    {
+      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+      *a++ = static_cast<EGLint>(obj.format_modifier & 0xFFFFFFFFu);
+      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+      *a++ = static_cast<EGLint>(obj.format_modifier >> 32);
+    }
+    *a = EGL_NONE;
+
+    cache.eglImage[i] =
+        m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    if (!cache.eglImage[i])
+    {
+      CLog::Log(LOGERROR,
+                "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - eglCreateImageKHR failed for "
+                "plane {} (EGL error 0x{:x})",
+                i, static_cast<unsigned>(eglGetError()));
+      success = false;
+      break;
+    }
+
+    glBindTexture(texTarget, cache.glTex[i]);
+
+    if (firstFrame)
+    {
+      glTexParameteri(texTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(texTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(texTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(texTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    m_glEGLImageTargetTexture2DOES(texTarget, cache.eglImage[i]);
+
+    if (firstFrame)
+    {
+      pl_opengl_wrap_params wp{};
+      wp.texture = cache.glTex[i];
+      wp.target = texTarget;
+      wp.iformat = static_cast<int>(glIformats[i]);
+      wp.width = planeW[i];
+      wp.height = planeH[i];
+
+      cache.plTex[i] = pl_opengl_wrap(gpu, &wp);
+      if (!cache.plTex[i])
+      {
+        CLog::Log(LOGERROR,
+                  "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - pl_opengl_wrap failed for plane {}",
+                  i);
+        success = false;
+      }
+      cache.width[i] = planeW[i];
+      cache.height[i] = planeH[i];
+    }
+  }
+
+  if (!success)
+  {
+    if (firstFrame)
+    {
+      for (int n = 0; n < numPlanes; ++n)
+      {
+        if (cache.plTex[n])
+          pl_tex_destroy(gpu, &cache.plTex[n]);
+        if (cache.eglImage[n] != EGL_NO_IMAGE_KHR)
+          m_eglDestroyImageKHR(m_eglDisplay, cache.eglImage[n]);
+        cache.eglImage[n] = EGL_NO_IMAGE_KHR;
+      }
+      glDeleteTextures(numPlanes, cache.glTex);
+      std::fill(std::begin(cache.glTex), std::end(cache.glTex), 0u);
+      cache = {};
+    }
+    drmBuf->ReleaseDescriptor();
+    return false;
+  }
+
+  if (firstFrame)
+  {
+    cache.numPlanes = numPlanes;
+    cache.initialized = true;
+  }
+
+  // Copy cached pl_tex pointers into the per-frame PLBuffer
+  for (int i = 0; i < cache.numPlanes; ++i)
+    plbuf.tex[i] = cache.plTex[i];
+
+  plbuf.usedPerPlaneImport = true;
+  plbuf.num_planes = cache.numPlanes;
+
+  // Set up pl_plane component mapping
+  plbuf.planes[0] = {};
+  plbuf.planes[0].texture = plbuf.tex[0];
+  plbuf.planes[0].components = 1;
+  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  plbuf.planes[0].flipped = true;
+
+  if (cache.numPlanes >= 2)
+  {
+    plbuf.planes[1] = {};
+    plbuf.planes[1].texture = plbuf.tex[1];
+    if (layer->format == DRM_FORMAT_YUV420)
+    {
+      // Planar: each chroma plane has one component
+      plbuf.planes[1].components = 1;
+      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+    }
+    else
+    {
+      // Semi-planar (NV12, P010, etc.): interleaved CbCr
+      plbuf.planes[1].components = 2;
+      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+      plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+    }
+    plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[1].flipped = true;
+  }
+
+  if (cache.numPlanes >= 3)
+  {
+    plbuf.planes[2] = {};
+    plbuf.planes[2].texture = plbuf.tex[2];
+    plbuf.planes[2].components = 1;
+    plbuf.planes[2].component_mapping[0] = PL_CHANNEL_CR;
+    plbuf.planes[2].component_mapping[1] = PL_CHANNEL_NONE;
+    plbuf.planes[2].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[2].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[2].flipped = true;
+  }
+
+  // Color space: keep YCbCr system so DV reshaping curves can apply.
+  // Unlike the single-OES path, we do NOT force PL_COLOR_SYSTEM_RGB here.
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
+  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
+  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
+    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+
+  // Bit encoding for 10-bit formats (P010: 10 bits in 16-bit container, 6-bit shift)
+  if (layer->format == DRM_FORMAT_P010 || layer->format == DRM_FORMAT_P210)
+    plbuf.colorRepr.bits = {16, 10, 6};
+
+  // Apply DV metadata WITH colorRepr.dovi — raw YCbCr planes are available,
+  // so libplacebo can apply the full DV reshaping pipeline.
+  PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
+  PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
+
+  plbuf.iFlags = buf.iFlags;
+
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+  // GPU-side fence (same as the single-OES DRMPRIME path)
+  if (m_hasEGLSyncFence && !m_hasEGLModifiers)
+  {
+    if (desc->nb_objects > 0)
+    {
+      dma_buf_export_sync_file syncExport{};
+      syncExport.flags = DMA_BUF_SYNC_READ;
+      syncExport.fd = -1;
+      if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
+          syncExport.fd >= 0)
+      {
+        EGLint syncAttribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
+        plbuf.eglSyncFence =
+            m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, syncAttribs);
+        if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
+          close(syncExport.fd);
+      }
+    }
+  }
+#endif
+
+  drmBuf->ReleaseDescriptor();
   plbuf.loaded = true;
   buf.loaded = true;
   return true;
@@ -1763,6 +2180,23 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
   {
     m_eglDestroySyncKHR(m_eglDisplay, plbuf.eglSyncFence);
     plbuf.eglSyncFence = EGL_NO_SYNC_KHR;
+  }
+
+  // Per-plane DRMPRIME (DV path): the cache owns GL textures and pl_tex wrappers.
+  // Just null the per-frame slots so the render pipeline won't reference stale data.
+  if (plbuf.usedPerPlaneImport)
+  {
+    for (int n = 0; n < plbuf.num_planes; ++n)
+    {
+      plbuf.tex[n] = nullptr; // cache owns it
+      plbuf.planes[n] = {};
+    }
+    plbuf.usedPerPlaneImport = false;
+    plbuf.colorSpace = {};
+    plbuf.colorRepr = {};
+    plbuf.num_planes = 0;
+    plbuf.loaded = false;
+    return;
   }
 
   m_drmTextures[index].Unmap();
