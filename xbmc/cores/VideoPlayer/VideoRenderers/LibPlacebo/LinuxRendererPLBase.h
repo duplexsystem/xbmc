@@ -1469,6 +1469,12 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     if (peakLuminance > 0.0f)
       frameOut.color.hdr.max_luma = peakLuminance;
   }
+  // Jointly infer source and destination color spaces. This is the canonical
+  // libplacebo approach (matches mpv's vo_gpu_next): it infers src first, then
+  // dst using src as reference, and coordinates SDR contrast (min_luma) between
+  // them. For HLG→HDR, it also tunes the HLG source peak to the display peak.
+  pl_color_space_infer_map(&frameIn.color, &frameOut.color);
+
   frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
   frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
                                                                            : PL_COLOR_LEVELS_FULL;
@@ -1482,12 +1488,30 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
 
   pl_render_params params = m_plConfig->GetOptions()->params;
   params.border = PL_CLEAR_SKIP;
+
+  // Don't cache single-display frames in GPU memory — most frames are shown once
+  // and immediately replaced. Caching wastes VRAM and upload bandwidth.
+  params.skip_caching_single_frame = true;
+
+  // Keep frame mixing cache across renders when interpolation is active.
+  // Disable interpolation entirely for still images (no adjacent frames to mix).
+  if (params.frame_mixer)
+    params.preserve_mixing_cache = true;
+
+  // Allow peak detection to lag one frame — avoids a GPU pipeline stall
+  // waiting for the compute shader result on the same frame it was measured.
+  if (params.peak_detect_params)
+  {
+    static pl_peak_detect_params peakParams = pl_peak_detect_default_params;
+    peakParams.allow_delayed = true;
+    params.peak_detect_params = &peakParams;
+  }
+
   // Dolby Vision RPU provides explicit per-frame luminance bounds in its metadata.
   // Libplacebo's peak detection pass is a redundant GPU sampling operation when DoVi
   // data is present — disable it to save a full GPU pass on every DV frame.
   if (plbuf.colorRepr.dovi != nullptr)
     params.peak_detect_params = nullptr;
-
 
   // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
   // a pass early.  Skipped when the context was created with GL_KHR_no_error

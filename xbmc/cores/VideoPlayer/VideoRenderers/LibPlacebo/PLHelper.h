@@ -96,13 +96,15 @@ const char* KodiScalingToPlacebo(ESCALINGMETHOD method);
 // Priority 1: Dolby Vision — decoder provides complete, authoritative metadata
 // via pl_map_avdovi_metadata. Use it directly; no fallbacks needed.
 //
-// Priority 2: Decoder's pl_map_hdr_metadata result (frame side data: mastering
-// display + content light + HDR10+ dynamic metadata). This is the authoritative
-// source for per-frame HDR metadata.
+// Priority 2: HDR10+ — per-frame dynamic tone mapping from decoder. scene_max
+// changes every frame, so assign directly (not merge) to avoid stale values.
 //
-// Priority 3 (fallback): When pl_map_hdr_metadata got no frame side data but
-// the stream is HDR, manually extract from displayMetadata/lightMetadata (which
-// come from stream hints via DVDVideoCodecFFmpeg's m_hints fallback path).
+// Priority 3: Static HDR10/HLG — decoder's pl_map_hdr_metadata result (mastering
+// display + content light level). Merge into colorSpace.
+//
+// Priority 4 (fallback): When pl_map_hdr_metadata got no frame side data,
+// manually extract from displayMetadata/lightMetadata (stream hints via
+// DVDVideoCodecFFmpeg's m_hints fallback path).
 template<typename TBuffer>
 void ApplyHdrMetadata(pl_color_space& colorSpace,
                       pl_color_repr& colorRepr,
@@ -119,66 +121,83 @@ void ApplyHdrMetadata(pl_color_space& colorSpace,
     return;
   }
 
-  // Priority 2: Decoder's pl_map_hdr_metadata result (per-frame side data)
+  // Priority 2: HDR10+ — per-frame dynamic metadata from decoder.
+  // scene_max[0] > 0 means pl_map_hdr_metadata extracted HDR10+ dynamic data.
+  // Assign directly: scene values change every frame, merge would keep stale data.
+  if (b.plColorSpace.hdr.scene_max[0] > 0)
+  {
+    colorSpace.hdr = b.plColorSpace.hdr;
+    return;
+  }
+
+  // Priority 3: Static HDR10/HLG from decoder's pl_map_hdr_metadata
   if (!pl_hdr_metadata_equal(&b.plColorSpace.hdr, &pl_hdr_metadata_empty))
   {
     pl_hdr_metadata_merge(&colorSpace.hdr, &b.plColorSpace.hdr);
+    return;
   }
-  else if (b.m_srcColTransfer == AVCOL_TRC_SMPTEST2084 ||
-           b.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67)
+
+  // Priority 4: Fallback — pl_map_hdr_metadata got no frame side data. Try stream
+  // hints from DVDVideoCodecFFmpeg's m_hints path. No transfer restriction:
+  // bcm2835-codec on RPi5 sends AVCOL_TRC_UNSPECIFIED even for HDR content.
+  if (b.hasDisplayMetadata)
   {
-    // Priority 3: Fallback — pl_map_hdr_metadata got no frame side data, but
-    // stream hints provided metadata via DVDVideoCodecFFmpeg's m_hints path.
-    if (b.hasDisplayMetadata)
+    const auto& m = b.displayMetadata;
+    auto& hdr = colorSpace.hdr;
+    hdr.prim.red = {static_cast<float>(av_q2d(m.display_primaries[0][0])),
+                    static_cast<float>(av_q2d(m.display_primaries[0][1]))};
+    hdr.prim.green = {static_cast<float>(av_q2d(m.display_primaries[1][0])),
+                      static_cast<float>(av_q2d(m.display_primaries[1][1]))};
+    hdr.prim.blue = {static_cast<float>(av_q2d(m.display_primaries[2][0])),
+                     static_cast<float>(av_q2d(m.display_primaries[2][1]))};
+    hdr.prim.white = {static_cast<float>(av_q2d(m.white_point[0])),
+                      static_cast<float>(av_q2d(m.white_point[1]))};
+    if (m.has_luminance)
     {
-      const auto& m = b.displayMetadata;
-      auto& hdr = colorSpace.hdr;
-      hdr.prim.red = {av_q2d(m.display_primaries[0][0]), av_q2d(m.display_primaries[0][1])};
-      hdr.prim.green = {av_q2d(m.display_primaries[1][0]), av_q2d(m.display_primaries[1][1])};
-      hdr.prim.blue = {av_q2d(m.display_primaries[2][0]), av_q2d(m.display_primaries[2][1])};
-      hdr.prim.white = {av_q2d(m.white_point[0]), av_q2d(m.white_point[1])};
-      if (m.has_luminance)
-      {
-        hdr.max_luma = av_q2d(m.max_luminance);
-        hdr.min_luma = av_q2d(m.min_luminance);
-      }
+      hdr.max_luma = static_cast<float>(av_q2d(m.max_luminance));
+      hdr.min_luma = static_cast<float>(av_q2d(m.min_luminance));
     }
-    if (b.hasLightMetadata)
-    {
-      colorSpace.hdr.max_cll = b.lightMetadata.MaxCLL;
-      colorSpace.hdr.max_fall = b.lightMetadata.MaxFALL;
-    }
+  }
+  if (b.hasLightMetadata)
+  {
+    colorSpace.hdr.max_cll = b.lightMetadata.MaxCLL;
+    colorSpace.hdr.max_fall = b.lightMetadata.MaxFALL;
   }
 }
 
-// Ensures primaries, transfer, and YCbCr system are valid for libplacebo.
-// Uses HDR metadata presence (max_luma, max_cll) to make informed defaults
-// instead of blind guessing. Also guards against out-of-range enum values
-// that cause SIGSEGV via __builtin_unreachable() on ARM64.
+// Ensures primaries, transfer, color system, and luminance are valid for
+// libplacebo. Guards against out-of-range enum values that cause UB via
+// __builtin_unreachable() on ARM64 (manifests as NaN in GLSL constants).
+//
+// Uses HDR metadata presence to make informed defaults for UNKNOWN fields,
+// then delegates to pl_color_space_infer() — libplacebo's own inference that
+// computes signal peak from transfer function and fills remaining gaps. This
+// matches mpv's approach (mp_image_params_guess_csp → pl_color_space_infer).
 inline void ValidateInputColorSpace(pl_color_space& colorSpace, pl_color_repr& colorRepr)
 {
-  const bool hasHdrLuminance = colorSpace.hdr.max_luma > 0 || colorSpace.hdr.max_cll > 0;
-  const bool hasHdrSceneInfo = colorSpace.hdr.scene_max[0] > 0;
-  const bool isHdrContent = hasHdrLuminance || hasHdrSceneInfo;
+  const bool hasAnyHdrMeta = !pl_hdr_metadata_equal(&colorSpace.hdr, &pl_hdr_metadata_empty);
 
-  // Primaries: use metadata-informed default instead of blind BT.709
-  if (colorSpace.primaries <= PL_COLOR_PRIM_UNKNOWN ||
+  // Clamp out-of-range enums to UNKNOWN before inference. These originate from
+  // hw decoders returning garbage values and would hit pl_unreachable() → UB.
+  if (colorSpace.primaries < PL_COLOR_PRIM_UNKNOWN ||
       colorSpace.primaries >= PL_COLOR_PRIM_COUNT)
-    colorSpace.primaries = isHdrContent ? PL_COLOR_PRIM_BT_2020 : PL_COLOR_PRIM_BT_709;
+    colorSpace.primaries = PL_COLOR_PRIM_UNKNOWN;
+  if (colorSpace.transfer < PL_COLOR_TRC_UNKNOWN || colorSpace.transfer >= PL_COLOR_TRC_COUNT)
+    colorSpace.transfer = PL_COLOR_TRC_UNKNOWN;
 
-  // Transfer: use metadata-informed default instead of blind BT.1886
-  if (colorSpace.transfer <= PL_COLOR_TRC_UNKNOWN || colorSpace.transfer >= PL_COLOR_TRC_COUNT)
-    colorSpace.transfer = isHdrContent ? PL_COLOR_TRC_PQ : PL_COLOR_TRC_BT_1886;
-
-  // HDR transfer implies BT.2020 primaries when confirmed by metadata
-  if ((colorSpace.transfer == PL_COLOR_TRC_PQ || colorSpace.transfer == PL_COLOR_TRC_HLG) &&
-      colorSpace.primaries == PL_COLOR_PRIM_BT_709 && isHdrContent)
+  // When HDR metadata is present but primaries/transfer are UNKNOWN (e.g.
+  // RPi5 bcm2835-codec sends AVCOL_TRC_UNSPECIFIED for HDR content), set
+  // informed defaults before pl_color_space_infer's generic BT.709/BT.1886.
+  if (hasAnyHdrMeta)
   {
-    colorSpace.primaries = PL_COLOR_PRIM_BT_2020;
+    if (!colorSpace.primaries)
+      colorSpace.primaries = PL_COLOR_PRIM_BT_2020;
+    if (!colorSpace.transfer)
+      colorSpace.transfer = PL_COLOR_TRC_PQ;
   }
 
-  // HDR YCbCr content must use BT.2020 matrix
-  if ((colorSpace.transfer == PL_COLOR_TRC_PQ || colorSpace.transfer == PL_COLOR_TRC_HLG) &&
+  // HDR YCbCr content must use a BT.2020 matrix
+  if (pl_color_transfer_is_hdr(colorSpace.transfer) &&
       pl_color_system_is_ycbcr_like(colorRepr.sys) &&
       colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_NC &&
       colorRepr.sys != PL_COLOR_SYSTEM_BT_2020_C &&
@@ -187,6 +206,16 @@ inline void ValidateInputColorSpace(pl_color_space& colorSpace, pl_color_repr& c
   {
     colorRepr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
   }
+
+  // Let libplacebo fill remaining gaps: computes signal peak (max_luma) from
+  // transfer function, infers min_luma, defaults hdr.prim from primaries.
+  // This is the canonical way to ensure a complete pl_color_space — avoids
+  // the NaN crash from max_luma=0 reaching pl_color_transfer_nominal_peak.
+  pl_color_space_infer(&colorSpace);
+
+  // Strip HDR metadata from SDR content (matches mpv behavior)
+  if (!pl_color_space_is_hdr(&colorSpace))
+    colorSpace.hdr = pl_hdr_metadata_empty;
 }
 
 class RenderConfig

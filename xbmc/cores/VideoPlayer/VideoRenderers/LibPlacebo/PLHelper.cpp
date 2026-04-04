@@ -136,7 +136,7 @@ bool PL::PLInstance::Init()
   // GPU before the renderer is created so shader compilation can be cached.
   pl_cache_params cacheParams{};
   cacheParams.log = m_plLog;
-  cacheParams.max_total_size = 64 * 1024 * 1024; // 64 MB cap
+  cacheParams.max_total_size = 128 * 1024 * 1024; // 128 MB cap (matches mpv)
   m_plCache = pl_cache_create(&cacheParams);
   LoadCache();
   pl_gpu_set_cache(m_plGpu, m_plCache);
