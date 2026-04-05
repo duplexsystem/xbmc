@@ -62,6 +62,9 @@ extern "C"
 #ifndef GL_RG16
 #define GL_RG16 0x822C
 #endif
+#ifndef GL_RGB16
+#define GL_RGB16 0x8054
+#endif
 #ifndef GL_RGBA16
 #define GL_RGBA16 0x805B
 #endif
@@ -112,6 +115,13 @@ protected:
   [[nodiscard]] virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
 
 private:
+  // Maximum number of VAAPI layers / DRM planes we handle.
+  static constexpr uint32_t kMaxPlanes = 3;
+
+  // Fraction of a vsync period allowed for decoder jitter before pl_queue_update
+  // falls back to PL_QUEUE_MORE. Tuned for V4L2/bcm2835-codec on RPi5.
+  static constexpr float kQueueTimeoutVsyncFraction = 0.4f;
+
   // Persistent per-slot GL resources for the software decode upload path.
   // Kept separate from PLBuffer so they survive across per-frame ReleasePLBuffer
   // calls (which only destroy the lightweight pl_tex wrappers). Freed in
@@ -177,12 +187,14 @@ private:
   // GL textures and pl_tex wrappers are created once (dimensions are stable for
   // the entire video) and reused across frames.  Only the EGLImages change per
   // frame — glEGLImageTargetTexture2DOES rebinds the existing GL texture to the
-  // new EGLImage, avoiding glGenTextures/glDeleteTextures/glTexParameteri/
-  // pl_opengl_wrap/pl_tex_destroy overhead (the last two cause glGetError stalls
-  // on tile-based GPUs).
+  // new EGLImage.  glEGLImageTargetTexStorageEXT cannot be used here because it
+  // creates immutable-format textures that cannot be rebound to a new EGLImage.
+  // This avoids glGenTextures/glDeleteTextures/glTexParameteri/pl_opengl_wrap/
+  // pl_tex_destroy overhead per frame (the last two cause glGetError stalls on
+  // tile-based GPUs).
   struct DRMPlaneCache
   {
-    static constexpr int MAX_PLANES = 3;
+    static constexpr int MAX_PLANES = kMaxPlanes;
     pl_tex plTex[MAX_PLANES]{};
     GLuint glTex[MAX_PLANES]{};
     EGLImageKHR eglImage[MAX_PLANES]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
@@ -237,6 +249,10 @@ private:
   pl_queue m_plQueue{nullptr};
   double m_queuePtsOffset{0.0};
   bool m_queuePtsOffsetSet{false};
+  // True when frame mixing or deinterlacing is active, meaning the queue
+  // path (pl_render_image_mix) should be used.  When false, the queue
+  // push/update cycle is skipped and pl_render_image is used directly.
+  bool m_queueNeeded{false};
 
   // Cached GL framebuffer → pl_tex wrapper.
   // pl_opengl_wrap/pl_tex_destroy for a framebuffer flushes GPU command queues on
@@ -287,12 +303,39 @@ private:
   bool UploadDRMPRIMEPlanes(int index, PLBuffer& plbuf);
   bool UploadSoftware(int index, PLBuffer& plbuf);
 
-  // Maps combined DRM multi-plane formats to per-plane single-component formats.
-  // Returns false if the format can't be split (single-plane or unknown).
-  static bool SplitDrmFormat(uint32_t layerFormat,
-                             int numPlanes,
-                             uint32_t (&planeFormats)[3],
-                             GLenum (&glIformats)[3]);
+  // Chroma subsampling divisors for a pixel format.
+  // chroma width  = (fullW + widthDiv - 1) / widthDiv
+  // chroma height = (fullH + heightDiv - 1) / heightDiv
+  // Defaults to {1, 1, false}: callers must check `known` before use, but
+  // if the guard is missed the 1:1 divisors produce full-resolution chroma
+  // (a visual artifact) instead of a divide-by-zero crash.
+  struct ChromaDiv
+  {
+    int widthDiv{1};
+    int heightDiv{1};
+    bool known{false};
+  };
+
+  // Look up chroma subsampling from a combined (multi-plane) DRM format.
+  static ChromaDiv ChromaDivFromDrmFormat(uint32_t drmFormat);
+
+#if defined(HAVE_LIBVA)
+  // Look up chroma subsampling from a VA fourcc.
+  static ChromaDiv ChromaDivFromVaFourcc(uint32_t vaFourcc);
+#endif
+
+  // Per-plane format and subsampling info for a multi-plane DRM format.
+  // GL internal formats are derived via DrmFormatToGLIformat() to avoid
+  // duplicating the DRM → GL mapping.
+  struct DRMPlaneSplit
+  {
+    uint32_t drmFormat[kMaxPlanes]{};
+    ChromaDiv chroma;
+  };
+
+  // Split a combined DRM multi-plane format into per-plane formats with subsampling.
+  // Returns an invalid split (valid == false) for single-plane or unknown formats.
+  static DRMPlaneSplit SplitDrmFormat(uint32_t layerFormat, int numPlanes);
 
   static bool MapCallback(pl_gpu gpu,
                           pl_tex* tex,
@@ -315,7 +358,9 @@ private:
   void ExportDmaBufSyncFence(int dmaBufFd, PLBuffer& plbuf);
 
   // Build EGL_LINUX_DMA_BUF_EXT attrib list for a single DMA-buf plane.
+  // Caller must provide an array of at least kDmaBufEGLAttribsSize elements.
   // Returns pointer past the last written element (the EGL_NONE terminator).
+  static constexpr int kDmaBufEGLAttribsSize = 6 * 2 + 2 * 2 + 1; // 6 mandatory + 2 modifier + terminator
   EGLint* BuildDmaBufEGLAttribs(EGLint* a,
                                 uint32_t drmFormat,
                                 int width,
@@ -324,6 +369,10 @@ private:
                                 int offset,
                                 int pitch,
                                 uint64_t modifier) const;
+
+  // Map a single-plane DRM fourcc to its GL internal format.
+  // Returns 0 for unrecognized formats.
+  static GLenum DrmFormatToGLIformat(uint32_t drmFormat);
 
   // Set common texture parameters for DMA-buf imported textures.
   static void SetTextureDefaults(GLenum target);
@@ -577,7 +626,7 @@ void CLinuxRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, i
   TBase::AddVideoPicture(picture, index);
   m_plBuffers[index].loaded = false;
 
-  if (!m_plQueue || this->m_fps <= 0.0f)
+  if (!m_plQueue || !m_queueNeeded || this->m_fps <= 0.0f)
     return;
 
   if (!m_queuePtsOffsetSet)
@@ -730,6 +779,16 @@ void CLinuxRendererPLBase<TBase>::UpdateVideoFilter()
 {
   TBase::UpdateVideoFilter();
   m_plConfig->UpdateVideoFilter(this->m_scalingMethod, this->m_videoSettings);
+
+  // Check whether the queue is needed.  pl_frame_mix_radius > 0 means frame
+  // mixing is active; deinterlace_params != nullptr means deinterlacing is
+  // enabled.  Temporal algorithms (yadif, bwdif) need prev/next frames that
+  // only pl_queue_update provides; bob is spatial-only but still benefits from
+  // the queue's field-timing logic.  HDR peak detection is per-frame and does
+  // not require the queue.
+  const pl_render_params& params = m_plConfig->GetOptions()->params;
+  m_queueNeeded =
+      (pl_frame_mix_radius(&params) > 0.0f) || (params.deinterlace_params != nullptr);
 }
 
 template<typename TBase>
@@ -915,7 +974,20 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   const pl_gpu gpu = plInst->GetGpu();
   const GLenum vaapiTexTarget = GetVaapiTexTarget();
   bool success = true;
-  const uint32_t numLayers = std::min(desc.num_layers, 3u);
+  const uint32_t numLayers = std::min(desc.num_layers, kMaxPlanes);
+
+  const ChromaDiv chroma = ChromaDivFromVaFourcc(desc.fourcc);
+  if (!chroma.known)
+  {
+    CLog::Log(LOGERROR,
+              "CLinuxRendererPLBase::UploadVAAPI - unknown VA fourcc 0x{:x}, "
+              "cannot determine chroma subsampling",
+              desc.fourcc);
+    return false;
+  }
+  const int chromaWDiv = chroma.widthDiv;
+  const int chromaHDiv = chroma.heightDiv;
+
   glGenTextures(static_cast<GLsizei>(numLayers), plbuf.vaapiGLTex);
 
   for (uint32_t i = 0; i < numLayers && success; ++i)
@@ -924,11 +996,13 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     const auto& object = desc.objects[layer.object_index[0]];
 
     const EGLint planeW =
-        (i == 0) ? static_cast<EGLint>(desc.width) : (static_cast<EGLint>(desc.width) + 1) / 2;
+        (i == 0) ? static_cast<EGLint>(desc.width)
+                 : (static_cast<EGLint>(desc.width) + chromaWDiv - 1) / chromaWDiv;
     const EGLint planeH =
-        (i == 0) ? static_cast<EGLint>(desc.height) : (static_cast<EGLint>(desc.height) + 1) / 2;
+        (i == 0) ? static_cast<EGLint>(desc.height)
+                 : (static_cast<EGLint>(desc.height) + chromaHDiv - 1) / chromaHDiv;
 
-    EGLint attribs[17];
+    EGLint attribs[kDmaBufEGLAttribsSize];
     BuildDmaBufEGLAttribs(attribs, layer.drm_format, planeW, planeH, object.fd,
                           static_cast<int>(layer.offset[0]), static_cast<int>(layer.pitch[0]),
                           object.drm_format_modifier);
@@ -953,42 +1027,23 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     else
       m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
 
-    GLenum glIformat = 0;
-    switch (layer.drm_format)
-    {
-      case DRM_FORMAT_R8:
-        glIformat = GL_R8;
-        break;
-      case DRM_FORMAT_GR88:
-        glIformat = GL_RG8;
-        break;
-      case DRM_FORMAT_R16:
-        glIformat = GL_R16;
-        break;
-      case DRM_FORMAT_GR1616:
-        glIformat = GL_RG16;
-        break;
-      case DRM_FORMAT_ABGR8888:
-      case DRM_FORMAT_XBGR8888:
-        glIformat = GL_RGBA8;
-        break;
+    GLenum glIformat = DrmFormatToGLIformat(layer.drm_format);
 #ifdef DRM_FORMAT_P030
-      case DRM_FORMAT_P030:
-        // 10-bit packed: 3x10-bit components in 32-bit word. Map as R16/RG16
-        // so libplacebo sees the correct container width; actual bit depth is
-        // conveyed via pl_bit_encoding.
-        glIformat = (i == 0) ? GL_R16 : GL_RG16;
-        break;
+    // P030: 10-bit packed (3×10 in 32-bit word). The driver exports it as a
+    // single DRM format per layer; map luma as R16, chroma as RG16 so
+    // libplacebo sees the correct container width. Bit depth is conveyed
+    // via pl_bit_encoding.
+    if (layer.drm_format == DRM_FORMAT_P030)
+      glIformat = (i == 0) ? GL_R16 : GL_RG16;
 #endif
-      default:
-        CLog::Log(LOGERROR,
-                  "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
-                  layer.drm_format, i);
-        success = false;
-        break;
-    }
-    if (!success)
+    if (glIformat == 0)
+    {
+      CLog::Log(LOGERROR,
+                "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
+                layer.drm_format, i);
+      success = false;
       break;
+    }
 
     pl_opengl_wrap_params wp{};
     wp.texture = plbuf.vaapiGLTex[i];
@@ -1252,6 +1307,31 @@ void CLinuxRendererPLBase<TBase>::SetTextureDefaults(GLenum target)
 }
 
 // ---------------------------------------------------------------------------
+// DrmFormatToGLIformat — map single-plane DRM fourcc to GL internal format
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+GLenum CLinuxRendererPLBase<TBase>::DrmFormatToGLIformat(uint32_t drmFormat)
+{
+  switch (drmFormat)
+  {
+    case DRM_FORMAT_R8:
+      return GL_R8;
+    case DRM_FORMAT_GR88:
+      return GL_RG8;
+    case DRM_FORMAT_R16:
+      return GL_R16;
+    case DRM_FORMAT_GR1616:
+      return GL_RG16;
+    case DRM_FORMAT_ABGR8888:
+    case DRM_FORMAT_XBGR8888:
+      return GL_RGBA8;
+    default:
+      return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SetYCbCrPlaneMapping — set up Y/CbCr/Cr pl_plane component mapping
 // ---------------------------------------------------------------------------
 
@@ -1303,49 +1383,118 @@ void CLinuxRendererPLBase<TBase>::SetYCbCrPlaneMapping(PLBuffer& plbuf,
 }
 
 // ---------------------------------------------------------------------------
+// ChromaDivFromDrmFormat — chroma subsampling for combined DRM pixel formats
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+typename CLinuxRendererPLBase<TBase>::ChromaDiv
+CLinuxRendererPLBase<TBase>::ChromaDivFromDrmFormat(uint32_t drmFormat)
+{
+  switch (drmFormat)
+  {
+    // 4:2:0
+    case DRM_FORMAT_NV12:
+    case DRM_FORMAT_P010:
+#ifdef DRM_FORMAT_P030
+    case DRM_FORMAT_P030:
+#endif
+    case DRM_FORMAT_YUV420:
+      return {2, 2, true};
+    // 4:2:2
+    case DRM_FORMAT_NV16:
+    case DRM_FORMAT_P210:
+    case DRM_FORMAT_YUV422:
+      return {2, 1, true};
+    // 4:4:4
+    case DRM_FORMAT_YUV444:
+      return {1, 1, true};
+    default:
+      return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ChromaDivFromVaFourcc — chroma subsampling for VA-API surface formats
+// ---------------------------------------------------------------------------
+
+#if defined(HAVE_LIBVA)
+template<typename TBase>
+typename CLinuxRendererPLBase<TBase>::ChromaDiv
+CLinuxRendererPLBase<TBase>::ChromaDivFromVaFourcc(uint32_t vaFourcc)
+{
+  switch (vaFourcc)
+  {
+    // 4:2:0
+    case VA_FOURCC_NV12:
+    case VA_FOURCC_P010:
+    case VA_FOURCC_P016:
+    case VA_FOURCC_YV12:
+    case VA_FOURCC_I420:
+    case VA_FOURCC_IMC3:
+      return {2, 2, true};
+    // 4:2:2
+    case VA_FOURCC_YUY2:
+    case VA_FOURCC_UYVY:
+    case VA_FOURCC_Y210:
+    case VA_FOURCC_Y212:
+      return {2, 1, true};
+    // 4:4:4
+    case VA_FOURCC_Y410:
+    case VA_FOURCC_Y412:
+    case VA_FOURCC_AYUV:
+    case VA_FOURCC_XYUV:
+      return {1, 1, true};
+    default:
+      return {};
+  }
+}
+#endif // HAVE_LIBVA
+
+// ---------------------------------------------------------------------------
 // SplitDrmFormat — map combined DRM multi-plane formats to per-plane formats
 // ---------------------------------------------------------------------------
 
 template<typename TBase>
-bool CLinuxRendererPLBase<TBase>::SplitDrmFormat(uint32_t layerFormat,
-                                                 int numPlanes,
-                                                 uint32_t (&planeFormats)[3],
-                                                 GLenum (&glIformats)[3])
+typename CLinuxRendererPLBase<TBase>::DRMPlaneSplit
+CLinuxRendererPLBase<TBase>::SplitDrmFormat(uint32_t layerFormat, int numPlanes)
 {
+  DRMPlaneSplit s;
   if (numPlanes < 2)
-    return false;
+    return s;
+
+  s.chroma = ChromaDivFromDrmFormat(layerFormat);
+  if (!s.chroma.known)
+    return s;
+
   switch (layerFormat)
   {
+    // Semi-planar 8-bit (R8 luma + GR88 chroma)
     case DRM_FORMAT_NV12:
     case DRM_FORMAT_NV16:
-      planeFormats[0] = DRM_FORMAT_R8;
-      glIformats[0] = GL_R8;
-      planeFormats[1] = DRM_FORMAT_GR88;
-      glIformats[1] = GL_RG8;
-      return true;
+      s.drmFormat[0] = DRM_FORMAT_R8;
+      s.drmFormat[1] = DRM_FORMAT_GR88;
+      break;
+    // Semi-planar 10/16-bit (R16 luma + GR1616 chroma)
     case DRM_FORMAT_P010:
     case DRM_FORMAT_P210:
 #ifdef DRM_FORMAT_P030
     case DRM_FORMAT_P030:
 #endif
-      planeFormats[0] = DRM_FORMAT_R16;
-      glIformats[0] = GL_R16;
-      planeFormats[1] = DRM_FORMAT_GR1616;
-      glIformats[1] = GL_RG16;
-      return true;
+      s.drmFormat[0] = DRM_FORMAT_R16;
+      s.drmFormat[1] = DRM_FORMAT_GR1616;
+      break;
+    // Planar 8-bit (three R8 planes)
     case DRM_FORMAT_YUV420:
     case DRM_FORMAT_YUV422:
     case DRM_FORMAT_YUV444:
-      planeFormats[0] = DRM_FORMAT_R8;
-      glIformats[0] = GL_R8;
-      planeFormats[1] = DRM_FORMAT_R8;
-      glIformats[1] = GL_R8;
-      planeFormats[2] = DRM_FORMAT_R8;
-      glIformats[2] = GL_R8;
-      return true;
+      s.drmFormat[0] = s.drmFormat[1] = s.drmFormat[2] = DRM_FORMAT_R8;
+      break;
     default:
-      return false;
+      // chroma was known but no plane split defined — reset to unknown
+      s.chroma = {};
+      return s;
   }
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,9 +1533,8 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
   const int fullW = static_cast<int>(drmBuf->GetWidth());
   const int fullH = static_cast<int>(drmBuf->GetHeight());
 
-  uint32_t planeFormats[3]{};
-  GLenum glIformats[3]{};
-  if (!SplitDrmFormat(layer->format, numPlanes, planeFormats, glIformats))
+  const DRMPlaneSplit split = SplitDrmFormat(layer->format, numPlanes);
+  if (!split.chroma.known)
   {
     CLog::Log(LOGERROR,
               "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - unsupported DRM format 0x{:x} "
@@ -1396,59 +1544,18 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     return false;
   }
 
+  const int chromaW = (fullW + split.chroma.widthDiv - 1) / split.chroma.widthDiv;
+  const int chromaH = (fullH + split.chroma.heightDiv - 1) / split.chroma.heightDiv;
+  const int planeW[kMaxPlanes] = {fullW, chromaW, chromaW};
+  const int planeH[kMaxPlanes] = {fullH, chromaH, chromaH};
+
   const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
-  // Use GL_TEXTURE_2D for per-plane single-component textures.
-  // Unlike the combined OES path, single-plane DRM formats (R8, GR88, etc.)
-  // are not opaque — they map directly to standard GL internal formats.
-  const GLenum texTarget = GL_TEXTURE_2D;
+  // Per-plane texture target: GL_TEXTURE_2D on desktop GL, GL_TEXTURE_EXTERNAL_OES
+  // on GLES.  Some GLES drivers (V3D, Mali) require OES for any DMA-buf EGLImage,
+  // even single-component formats like R8/GR88.
+  const GLenum texTarget = GetVaapiTexTarget();
   DRMPlaneCache& cache = m_drmPlaneCache[index];
   bool success = true;
-
-  int planeW[DRMPlaneCache::MAX_PLANES]{};
-  int planeH[DRMPlaneCache::MAX_PLANES]{};
-  for (int i = 0; i < numPlanes; ++i)
-  {
-    if (i == 0)
-    {
-      planeW[i] = fullW;
-      planeH[i] = fullH;
-    }
-    else
-    {
-      switch (layer->format)
-      {
-        // 4:4:4: no chroma subsampling
-        case DRM_FORMAT_YUV444:
-          planeW[i] = fullW;
-          planeH[i] = fullH;
-          break;
-        // 4:2:2: chroma width halved, full height
-        case DRM_FORMAT_NV16:
-        case DRM_FORMAT_P210:
-        case DRM_FORMAT_YUV422:
-          planeW[i] = (fullW + 1) / 2;
-          planeH[i] = fullH;
-          break;
-        // 4:2:0: both halved
-        case DRM_FORMAT_NV12:
-        case DRM_FORMAT_P010:
-#ifdef DRM_FORMAT_P030
-        case DRM_FORMAT_P030:
-#endif
-        case DRM_FORMAT_YUV420:
-          planeW[i] = (fullW + 1) / 2;
-          planeH[i] = (fullH + 1) / 2;
-          break;
-        default:
-          CLog::Log(LOGERROR,
-                    "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - no chroma subsampling "
-                    "known for DRM format 0x{:x}",
-                    layer->format);
-          drmBuf->ReleaseDescriptor();
-          return false;
-      }
-    }
-  }
 
   const bool firstFrame = !cache.initialized;
   if (firstFrame)
@@ -1465,8 +1572,8 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
 
     const auto& obj = desc->objects[layer->planes[i].object_index];
 
-    EGLint attribs[17];
-    BuildDmaBufEGLAttribs(attribs, planeFormats[i], planeW[i], planeH[i], obj.fd,
+    EGLint attribs[kDmaBufEGLAttribsSize];
+    BuildDmaBufEGLAttribs(attribs, split.drmFormat[i], planeW[i], planeH[i], obj.fd,
                           static_cast<int>(layer->planes[i].offset),
                           static_cast<int>(layer->planes[i].pitch), obj.format_modifier);
 
@@ -1487,6 +1594,11 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     if (firstFrame)
       SetTextureDefaults(texTarget);
 
+    // Always use glEGLImageTargetTexture2DOES (mutable path) here.
+    // glEGLImageTargetTexStorageEXT would create an immutable-format texture
+    // that cannot be rebound to a different EGLImage on subsequent frames.
+    // The VAAPI path can use TexStorage because it creates new GL textures
+    // every frame; this cache reuses them.
     m_glEGLImageTargetTexture2DOES(texTarget, cache.eglImage[i]);
 
     if (firstFrame)
@@ -1494,7 +1606,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
       pl_opengl_wrap_params wp{};
       wp.texture = cache.glTex[i];
       wp.target = texTarget;
-      wp.iformat = static_cast<int>(glIformats[i]);
+      wp.iformat = static_cast<int>(DrmFormatToGLIformat(split.drmFormat[i]));
       wp.width = planeW[i];
       wp.height = planeH[i];
 
@@ -1623,6 +1735,11 @@ bool CLinuxRendererPLBase<TBase>::PlaneDataToGLFormats(
     case 2:
       iformat = wide ? GL_RG16 : GL_RG8;
       format = GL_RG;
+      type = wide ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+      return true;
+    case 3:
+      iformat = wide ? GL_RGB16 : GL_RGB8;
+      format = GL_RGB;
       type = wide ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
       return true;
     case 4:
@@ -2044,9 +2161,11 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     }
   }
 
-  // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF)
+  // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF
+  // and frame mixing/interpolation).  Skipped when mix radius is 0 — no
+  // adjacent frames needed, so the direct pl_render_image path is cheaper.
   bool rendered = false;
-  if (m_plQueue && m_queuePtsOffsetSet)
+  if (m_plQueue && m_queueNeeded && m_queuePtsOffsetSet)
   {
     const auto& buf = this->m_buffers[idx];
     const float vsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
@@ -2059,7 +2178,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     // V4L2/bcm2835-codec on RPi5 has measurable decode jitter; a zero timeout causes
     // pl_queue_update to return PL_QUEUE_MORE on any slip, falling back to the direct
     // pl_render_image path and losing frame-mixing / motion-compensation.
-    qparams.timeout = static_cast<uint64_t>(vsyncDuration * 0.4f * 1e9f);
+    qparams.timeout = static_cast<uint64_t>(vsyncDuration * kQueueTimeoutVsyncFraction * 1e9f);
 
     pl_frame_mix mix{};
     const auto status = pl_queue_update(m_plQueue, &mix, &qparams);
