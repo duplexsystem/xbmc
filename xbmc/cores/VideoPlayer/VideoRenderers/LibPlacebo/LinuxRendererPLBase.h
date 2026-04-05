@@ -317,13 +317,13 @@ private:
   // Build EGL_LINUX_DMA_BUF_EXT attrib list for a single DMA-buf plane.
   // Returns pointer past the last written element (the EGL_NONE terminator).
   EGLint* BuildDmaBufEGLAttribs(EGLint* a,
-                                 uint32_t drmFormat,
-                                 int width,
-                                 int height,
-                                 int fd,
-                                 int offset,
-                                 int pitch,
-                                 uint64_t modifier) const;
+                                uint32_t drmFormat,
+                                int width,
+                                int height,
+                                int fd,
+                                int offset,
+                                int pitch,
+                                uint64_t modifier) const;
 
   // Set common texture parameters for DMA-buf imported textures.
   static void SetTextureDefaults(GLenum target);
@@ -1157,8 +1157,8 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
 template<typename TBase>
 template<typename TBuffer>
 void CLinuxRendererPLBase<TBase>::SetSourceColorSpace(PLBuffer& plbuf,
-                                                       const TBuffer& buf,
-                                                       bool isYCbCr)
+                                                      const TBuffer& buf,
+                                                      bool isYCbCr)
 {
   plbuf.colorSpace = {};
   plbuf.colorRepr = {};
@@ -1194,8 +1194,7 @@ void CLinuxRendererPLBase<TBase>::ExportDmaBufSyncFence(int dmaBufFd, PLBuffer& 
   if (ioctl(dmaBufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 && syncExport.fd >= 0)
   {
     const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
-    plbuf.eglSyncFence =
-        m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
     if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
       close(syncExport.fd);
   }
@@ -1208,13 +1207,13 @@ void CLinuxRendererPLBase<TBase>::ExportDmaBufSyncFence(int dmaBufFd, PLBuffer& 
 
 template<typename TBase>
 EGLint* CLinuxRendererPLBase<TBase>::BuildDmaBufEGLAttribs(EGLint* a,
-                                                            uint32_t drmFormat,
-                                                            int width,
-                                                            int height,
-                                                            int fd,
-                                                            int offset,
-                                                            int pitch,
-                                                            uint64_t modifier) const
+                                                           uint32_t drmFormat,
+                                                           int width,
+                                                           int height,
+                                                           int fd,
+                                                           int offset,
+                                                           int pitch,
+                                                           uint64_t modifier) const
 {
   *a++ = EGL_LINUX_DRM_FOURCC_EXT;
   *a++ = static_cast<EGLint>(drmFormat);
@@ -1258,8 +1257,8 @@ void CLinuxRendererPLBase<TBase>::SetTextureDefaults(GLenum target)
 
 template<typename TBase>
 void CLinuxRendererPLBase<TBase>::SetYCbCrPlaneMapping(PLBuffer& plbuf,
-                                                        int numPlanes,
-                                                        bool planarChroma)
+                                                       int numPlanes,
+                                                       bool planarChroma)
 {
   plbuf.planes[0] = {};
   plbuf.planes[0].texture = plbuf.tex[0];
