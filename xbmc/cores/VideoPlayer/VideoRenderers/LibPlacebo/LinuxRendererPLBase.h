@@ -304,6 +304,35 @@ private:
   void ReleasePLBuffer(int index);
   void ReleaseSWBuffer(int index);
 
+  // Populate plbuf.colorSpace/colorRepr from the buffer's source metadata.
+  // When isYCbCr is true, derives the YCbCr matrix from the stream and guesses
+  // BT.601/709/2020 if unknown. When false, forces PL_COLOR_SYSTEM_RGB (OES path).
+  template<typename TBuffer>
+  void SetSourceColorSpace(PLBuffer& plbuf, const TBuffer& buf, bool isYCbCr);
+
+  // Export a DMA-buf read fence as an EGL sync object for GPU-side wait.
+  // No-op when EGL sync fences or modifiers are unavailable.
+  void ExportDmaBufSyncFence(int dmaBufFd, PLBuffer& plbuf);
+
+  // Build EGL_LINUX_DMA_BUF_EXT attrib list for a single DMA-buf plane.
+  // Returns pointer past the last written element (the EGL_NONE terminator).
+  EGLint* BuildDmaBufEGLAttribs(EGLint* a,
+                                 uint32_t drmFormat,
+                                 int width,
+                                 int height,
+                                 int fd,
+                                 int offset,
+                                 int pitch,
+                                 uint64_t modifier) const;
+
+  // Set common texture parameters for DMA-buf imported textures.
+  static void SetTextureDefaults(GLenum target);
+
+  // Set up YCbCr pl_plane component mapping for numPlanes planes.
+  // When planarChroma is true (e.g. YUV420 3-plane), chroma planes have 1
+  // component each; when false (NV12/P010 semi-planar), plane 1 has 2 (CbCr).
+  static void SetYCbCrPlaneMapping(PLBuffer& plbuf, int numPlanes, bool planarChroma);
+
   // Map pl_plane_data component layout → GL iformat/format/type/bytesPerPixel.
   static bool PlaneDataToGLFormats(
       const pl_plane_data& pd, GLenum& iformat, GLenum& format, GLenum& type, int& bytesPerPixel);
@@ -873,35 +902,14 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   for (int obj = 0; obj < plbuf.vaapiNumFds; ++obj)
     plbuf.vaapiExportedFd[obj] = desc.objects[obj].fd;
 
-#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-  // EGL_ANDROID_native_fence_sync path: export a read fence from the first DMA-buf
-  // object and import it as an EGL Sync object. eglWaitSyncKHR (called in
-  // RenderHook) submits the wait to the GPU command stream asynchronously —
-  // the CPU is not stalled here.
-  if (!m_hasEGLModifiers && m_hasEGLSyncFence && plbuf.vaapiNumFds > 0)
+  // GPU-side fence: export DMA-buf read fence as EGL sync object.
+  // Falls back to CPU sync (vaSyncSurface) if the ioctl is unavailable.
+  if (plbuf.vaapiNumFds > 0)
   {
-    dma_buf_export_sync_file syncExport{};
-    syncExport.flags = DMA_BUF_SYNC_READ;
-    syncExport.fd = -1;
-    if (ioctl(plbuf.vaapiExportedFd[0], DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
-        syncExport.fd >= 0)
-    {
-      const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
-      plbuf.eglSyncFence = m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-
-      // If EGL failed to create the sync object, we must close the fd ourselves
-      if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
-      {
-        close(syncExport.fd);
-      }
-    }
-    else
-    {
-      // ioctl not available at runtime (older kernel); fall back to CPU sync.
+    ExportDmaBufSyncFence(plbuf.vaapiExportedFd[0], plbuf);
+    if (!m_hasEGLModifiers && plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
       vaSyncSurface(vadsp, surface);
-    }
   }
-#endif
 
   const auto plInst = PL::PLInstance::Get();
   const pl_gpu gpu = plInst->GetGpu();
@@ -920,31 +928,10 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     const EGLint planeH =
         (i == 0) ? static_cast<EGLint>(desc.height) : (static_cast<EGLint>(desc.height) + 1) / 2;
 
-    // 6 mandatory attribute pairs + 2 optional modifier pairs + EGL_NONE terminator
-    static constexpr int kEGLAttribsMax = 6 * 2 + 2 * 2 + 1;
-    static_assert(kEGLAttribsMax == 17, "Update kEGLAttribsMax if adding more EGL attributes");
-    EGLint attribs[kEGLAttribsMax];
-    EGLint* a = attribs;
-    *a++ = EGL_LINUX_DRM_FOURCC_EXT;
-    *a++ = static_cast<EGLint>(layer.drm_format);
-    *a++ = EGL_WIDTH;
-    *a++ = planeW;
-    *a++ = EGL_HEIGHT;
-    *a++ = planeH;
-    *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
-    *a++ = object.fd;
-    *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-    *a++ = static_cast<EGLint>(layer.offset[0]);
-    *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-    *a++ = static_cast<EGLint>(layer.pitch[0]);
-    if (m_hasEGLModifiers && object.drm_format_modifier != DRM_FORMAT_MOD_INVALID)
-    {
-      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-      *a++ = static_cast<EGLint>(object.drm_format_modifier & 0xFFFFFFFFu);
-      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-      *a++ = static_cast<EGLint>(object.drm_format_modifier >> 32);
-    }
-    *a = EGL_NONE;
+    EGLint attribs[17];
+    BuildDmaBufEGLAttribs(attribs, layer.drm_format, planeW, planeH, object.fd,
+                          static_cast<int>(layer.offset[0]), static_cast<int>(layer.pitch[0]),
+                          object.drm_format_modifier);
 
     EGLImageKHR eglImage =
         m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
@@ -960,10 +947,7 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     plbuf.vaapiEGLImage[i] = eglImage;
 
     glBindTexture(vaapiTexTarget, plbuf.vaapiGLTex[i]);
-    glTexParameteri(vaapiTexTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(vaapiTexTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(vaapiTexTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    SetTextureDefaults(vaapiTexTarget);
     if (m_hasEGLImageStorage)
       m_glEGLImageTargetTexStorageEXT(vaapiTexTarget, eglImage, nullptr);
     else
@@ -1029,36 +1013,9 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   }
 
   plbuf.num_planes = static_cast<int>(numLayers);
+  SetYCbCrPlaneMapping(plbuf, plbuf.num_planes, /*planarChroma=*/false);
 
-  plbuf.planes[0] = {};
-  plbuf.planes[0].texture = plbuf.tex[0];
-  plbuf.planes[0].components = 1;
-  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
-  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
-  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
-  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
-  plbuf.planes[0].flipped = true;
-
-  if (numLayers > 1)
-  {
-    plbuf.planes[1] = {};
-    plbuf.planes[1].texture = plbuf.tex[1];
-    plbuf.planes[1].components = 2;
-    plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
-    plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
-    plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
-    plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
-    plbuf.planes[1].flipped = true;
-  }
-
-  plbuf.colorSpace = {};
-  plbuf.colorRepr = {};
-  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
-  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
-    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
-  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  SetSourceColorSpace(plbuf, buf, /*isYCbCr=*/true);
 
   switch (desc.fourcc)
   {
@@ -1167,64 +1124,183 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   plbuf.planes[0].flipped = true; // DMA-buf row 0 = top of video, GL texcoord t=0 = bottom
   plbuf.num_planes = 1;
 
-  // The GPU driver applies the YCbCr→RGB matrix when the OES texture is sampled,
-  // yielding RGB in the source primaries/transfer. Tell libplacebo this is RGB.
-  plbuf.colorSpace = {};
-  plbuf.colorRepr = {};
-  plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
-  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  // OES: GPU driver already applied YCbCr→RGB when sampling.
+  SetSourceColorSpace(plbuf, buf, /*isYCbCr=*/false);
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
 
-  // OES textures: the GPU driver already applied the YCbCr→RGB matrix when
-  // sampling.  DV reshaping curves (colorRepr.dovi) operate on YCbCr input and
-  // cannot be applied on post-conversion RGB data — doing so produces wrong
-  // colours.  Keep the DV-informed HDR metadata (luminance from RPU) for tone
-  // mapping, but force RGB system and clear the reshaping pointer.
-  plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
+  // DV reshaping curves operate on YCbCr input and cannot be applied on
+  // post-conversion RGB data. Keep DV-informed HDR metadata (luminance from
+  // RPU) for tone mapping, but clear the reshaping pointer.
   plbuf.colorRepr.dovi = nullptr;
 
   PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
 
-#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-  // GPU-side fence for the V4L2 / DRMPRIME decode path (e.g. bcm2835-codec on
-  // RPi5).  The VC4/V3D pipeline sets a DMA-buf read fence on the output
-  // buffer when decode completes; we export it as a sync-file and import it
-  // as an EGL Sync object.  eglWaitSyncKHR (called in RenderHook) inserts the
-  // wait into the GPU command stream without stalling the CPU.
-  //
-  // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
-  // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
-  // reservation fence implicitly — adding an explicit sync is redundant.
-  if (m_hasEGLSyncFence && !m_hasEGLModifiers)
+  // GPU-side DMA-buf fence for V4L2/DRMPRIME decode path.
   {
     const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
     if (desc && desc->nb_objects > 0)
-    {
-      dma_buf_export_sync_file syncExport{};
-      syncExport.flags = DMA_BUF_SYNC_READ;
-      syncExport.fd = -1;
-      if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
-          syncExport.fd >= 0)
-      {
-        const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
-        plbuf.eglSyncFence =
-            m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-
-        if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
-          close(syncExport.fd);
-      }
-    }
+      ExportDmaBufSyncFence(desc->objects[0].fd, plbuf);
   }
-#endif
 
   plbuf.loaded = true;
   buf.loaded = true;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// SetSourceColorSpace — populate PLBuffer color metadata from source stream
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+template<typename TBuffer>
+void CLinuxRendererPLBase<TBase>::SetSourceColorSpace(PLBuffer& plbuf,
+                                                       const TBuffer& buf,
+                                                       bool isYCbCr)
+{
+  plbuf.colorSpace = {};
+  plbuf.colorRepr = {};
+  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
+  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  if (isYCbCr)
+  {
+    plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
+    if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
+      plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
+  }
+  else
+  {
+    plbuf.colorRepr.sys = PL_COLOR_SYSTEM_RGB;
+  }
+  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+}
+
+// ---------------------------------------------------------------------------
+// ExportDmaBufSyncFence — export DMA-buf read fence as EGL sync object
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CLinuxRendererPLBase<TBase>::ExportDmaBufSyncFence(int dmaBufFd, PLBuffer& plbuf)
+{
+#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+  if (!m_hasEGLSyncFence || m_hasEGLModifiers)
+    return;
+
+  dma_buf_export_sync_file syncExport{};
+  syncExport.flags = DMA_BUF_SYNC_READ;
+  syncExport.fd = -1;
+  if (ioctl(dmaBufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 && syncExport.fd >= 0)
+  {
+    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
+    plbuf.eglSyncFence =
+        m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
+      close(syncExport.fd);
+  }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// BuildDmaBufEGLAttribs — build EGL attrib list for a single DMA-buf plane
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+EGLint* CLinuxRendererPLBase<TBase>::BuildDmaBufEGLAttribs(EGLint* a,
+                                                            uint32_t drmFormat,
+                                                            int width,
+                                                            int height,
+                                                            int fd,
+                                                            int offset,
+                                                            int pitch,
+                                                            uint64_t modifier) const
+{
+  *a++ = EGL_LINUX_DRM_FOURCC_EXT;
+  *a++ = static_cast<EGLint>(drmFormat);
+  *a++ = EGL_WIDTH;
+  *a++ = static_cast<EGLint>(width);
+  *a++ = EGL_HEIGHT;
+  *a++ = static_cast<EGLint>(height);
+  *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
+  *a++ = fd;
+  *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+  *a++ = static_cast<EGLint>(offset);
+  *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+  *a++ = static_cast<EGLint>(pitch);
+  if (m_hasEGLModifiers && modifier != DRM_FORMAT_MOD_INVALID)
+  {
+    *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+    *a++ = static_cast<EGLint>(modifier & 0xFFFFFFFFu);
+    *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+    *a++ = static_cast<EGLint>(modifier >> 32);
+  }
+  *a = EGL_NONE;
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+// SetTextureDefaults — common texture parameters for DMA-buf imported textures
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CLinuxRendererPLBase<TBase>::SetTextureDefaults(GLenum target)
+{
+  glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+// ---------------------------------------------------------------------------
+// SetYCbCrPlaneMapping — set up Y/CbCr/Cr pl_plane component mapping
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CLinuxRendererPLBase<TBase>::SetYCbCrPlaneMapping(PLBuffer& plbuf,
+                                                        int numPlanes,
+                                                        bool planarChroma)
+{
+  plbuf.planes[0] = {};
+  plbuf.planes[0].texture = plbuf.tex[0];
+  plbuf.planes[0].components = 1;
+  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
+  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
+  plbuf.planes[0].flipped = true;
+
+  if (numPlanes >= 2)
+  {
+    plbuf.planes[1] = {};
+    plbuf.planes[1].texture = plbuf.tex[1];
+    if (planarChroma)
+    {
+      plbuf.planes[1].components = 1;
+      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+    }
+    else
+    {
+      plbuf.planes[1].components = 2;
+      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+      plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+    }
+    plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[1].flipped = true;
+  }
+
+  if (numPlanes >= 3)
+  {
+    plbuf.planes[2] = {};
+    plbuf.planes[2].texture = plbuf.tex[2];
+    plbuf.planes[2].components = 1;
+    plbuf.planes[2].component_mapping[0] = PL_CHANNEL_CR;
+    plbuf.planes[2].component_mapping[1] = PL_CHANNEL_NONE;
+    plbuf.planes[2].component_mapping[2] = PL_CHANNEL_NONE;
+    plbuf.planes[2].component_mapping[3] = PL_CHANNEL_NONE;
+    plbuf.planes[2].flipped = true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1335,8 @@ bool CLinuxRendererPLBase<TBase>::SplitDrmFormat(uint32_t layerFormat,
       glIformats[1] = GL_RG16;
       return true;
     case DRM_FORMAT_YUV420:
+    case DRM_FORMAT_YUV422:
+    case DRM_FORMAT_YUV444:
       planeFormats[0] = DRM_FORMAT_R8;
       glIformats[0] = GL_R8;
       planeFormats[1] = DRM_FORMAT_R8;
@@ -1327,7 +1405,6 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
   DRMPlaneCache& cache = m_drmPlaneCache[index];
   bool success = true;
 
-  // Compute per-plane dimensions (stable for the lifetime of the video).
   int planeW[DRMPlaneCache::MAX_PLANES]{};
   int planeH[DRMPlaneCache::MAX_PLANES]{};
   for (int i = 0; i < numPlanes; ++i)
@@ -1339,12 +1416,38 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     }
     else
     {
-      planeW[i] = (fullW + 1) / 2;
-      // 4:2:2 formats: chroma height = full height
-      if (layer->format == DRM_FORMAT_NV16 || layer->format == DRM_FORMAT_P210)
-        planeH[i] = fullH;
-      else
-        planeH[i] = (fullH + 1) / 2;
+      switch (layer->format)
+      {
+        // 4:4:4: no chroma subsampling
+        case DRM_FORMAT_YUV444:
+          planeW[i] = fullW;
+          planeH[i] = fullH;
+          break;
+        // 4:2:2: chroma width halved, full height
+        case DRM_FORMAT_NV16:
+        case DRM_FORMAT_P210:
+        case DRM_FORMAT_YUV422:
+          planeW[i] = (fullW + 1) / 2;
+          planeH[i] = fullH;
+          break;
+        // 4:2:0: both halved
+        case DRM_FORMAT_NV12:
+        case DRM_FORMAT_P010:
+#ifdef DRM_FORMAT_P030
+        case DRM_FORMAT_P030:
+#endif
+        case DRM_FORMAT_YUV420:
+          planeW[i] = (fullW + 1) / 2;
+          planeH[i] = (fullH + 1) / 2;
+          break;
+        default:
+          CLog::Log(LOGERROR,
+                    "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - no chroma subsampling "
+                    "known for DRM format 0x{:x}",
+                    layer->format);
+          drmBuf->ReleaseDescriptor();
+          return false;
+      }
     }
   }
 
@@ -1363,30 +1466,10 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
 
     const auto& obj = desc->objects[layer->planes[i].object_index];
 
-    // Build EGL attribs: single plane per image (PLANE0 attributes only)
-    static constexpr int kMaxAttribs = 6 * 2 + 2 * 2 + 1;
-    EGLint attribs[kMaxAttribs];
-    EGLint* a = attribs;
-    *a++ = EGL_LINUX_DRM_FOURCC_EXT;
-    *a++ = static_cast<EGLint>(planeFormats[i]);
-    *a++ = EGL_WIDTH;
-    *a++ = static_cast<EGLint>(planeW[i]);
-    *a++ = EGL_HEIGHT;
-    *a++ = static_cast<EGLint>(planeH[i]);
-    *a++ = EGL_DMA_BUF_PLANE0_FD_EXT;
-    *a++ = obj.fd;
-    *a++ = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-    *a++ = static_cast<EGLint>(layer->planes[i].offset);
-    *a++ = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-    *a++ = static_cast<EGLint>(layer->planes[i].pitch);
-    if (m_hasEGLModifiers && obj.format_modifier != DRM_FORMAT_MOD_INVALID)
-    {
-      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-      *a++ = static_cast<EGLint>(obj.format_modifier & 0xFFFFFFFFu);
-      *a++ = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-      *a++ = static_cast<EGLint>(obj.format_modifier >> 32);
-    }
-    *a = EGL_NONE;
+    EGLint attribs[17];
+    BuildDmaBufEGLAttribs(attribs, planeFormats[i], planeW[i], planeH[i], obj.fd,
+                          static_cast<int>(layer->planes[i].offset),
+                          static_cast<int>(layer->planes[i].pitch), obj.format_modifier);
 
     cache.eglImage[i] =
         m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
@@ -1403,12 +1486,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     glBindTexture(texTarget, cache.glTex[i]);
 
     if (firstFrame)
-    {
-      glTexParameteri(texTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(texTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(texTarget, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(texTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    }
+      SetTextureDefaults(texTarget);
 
     m_glEGLImageTargetTexture2DOES(texTarget, cache.eglImage[i]);
 
@@ -1467,93 +1545,24 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
   plbuf.usedPerPlaneImport = true;
   plbuf.num_planes = cache.numPlanes;
 
-  // Set up pl_plane component mapping
-  plbuf.planes[0] = {};
-  plbuf.planes[0].texture = plbuf.tex[0];
-  plbuf.planes[0].components = 1;
-  plbuf.planes[0].component_mapping[0] = PL_CHANNEL_Y;
-  plbuf.planes[0].component_mapping[1] = PL_CHANNEL_NONE;
-  plbuf.planes[0].component_mapping[2] = PL_CHANNEL_NONE;
-  plbuf.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
-  plbuf.planes[0].flipped = true;
+  // Planar formats (YUV420/422/444) have 3 planes with 1 component each;
+  // semi-planar (NV12, P010, etc.) have 2 planes with interleaved CbCr.
+  SetYCbCrPlaneMapping(plbuf, cache.numPlanes, /*planarChroma=*/cache.numPlanes >= 3);
 
-  if (cache.numPlanes >= 2)
-  {
-    plbuf.planes[1] = {};
-    plbuf.planes[1].texture = plbuf.tex[1];
-    if (layer->format == DRM_FORMAT_YUV420)
-    {
-      // Planar: each chroma plane has one component
-      plbuf.planes[1].components = 1;
-      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
-    }
-    else
-    {
-      // Semi-planar (NV12, P010, etc.): interleaved CbCr
-      plbuf.planes[1].components = 2;
-      plbuf.planes[1].component_mapping[0] = PL_CHANNEL_CB;
-      plbuf.planes[1].component_mapping[1] = PL_CHANNEL_CR;
-    }
-    plbuf.planes[1].component_mapping[2] = PL_CHANNEL_NONE;
-    plbuf.planes[1].component_mapping[3] = PL_CHANNEL_NONE;
-    plbuf.planes[1].flipped = true;
-  }
-
-  if (cache.numPlanes >= 3)
-  {
-    plbuf.planes[2] = {};
-    plbuf.planes[2].texture = plbuf.tex[2];
-    plbuf.planes[2].components = 1;
-    plbuf.planes[2].component_mapping[0] = PL_CHANNEL_CR;
-    plbuf.planes[2].component_mapping[1] = PL_CHANNEL_NONE;
-    plbuf.planes[2].component_mapping[2] = PL_CHANNEL_NONE;
-    plbuf.planes[2].component_mapping[3] = PL_CHANNEL_NONE;
-    plbuf.planes[2].flipped = true;
-  }
-
-  // Color space: keep YCbCr system so DV reshaping curves can apply.
-  // Unlike the single-OES path, we do NOT force PL_COLOR_SYSTEM_RGB here.
-  plbuf.colorSpace = {};
-  plbuf.colorRepr = {};
-  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
-  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
-    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
-  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
-  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
+  // YCbCr color space so DV reshaping curves can apply (unlike OES/RGB path).
+  SetSourceColorSpace(plbuf, buf, /*isYCbCr=*/true);
 
   // Bit encoding for 10-bit formats (P010: 10 bits in 16-bit container, 6-bit shift)
   if (layer->format == DRM_FORMAT_P010 || layer->format == DRM_FORMAT_P210)
     plbuf.colorRepr.bits = {16, 10, 6};
 
-  // Apply DV metadata WITH colorRepr.dovi — raw YCbCr planes are available,
-  // so libplacebo can apply the full DV reshaping pipeline.
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
   PL::ValidateInputColorSpace(plbuf.colorSpace, plbuf.colorRepr);
 
   plbuf.iFlags = buf.iFlags;
 
-#if defined(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
-  // GPU-side fence (same as the single-OES DRMPRIME path)
-  if (m_hasEGLSyncFence && !m_hasEGLModifiers)
-  {
-    if (desc->nb_objects > 0)
-    {
-      dma_buf_export_sync_file syncExport{};
-      syncExport.flags = DMA_BUF_SYNC_READ;
-      syncExport.fd = -1;
-      if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
-          syncExport.fd >= 0)
-      {
-        const EGLint syncAttribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
-        plbuf.eglSyncFence =
-            m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, syncAttribs);
-        if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
-          close(syncExport.fd);
-      }
-    }
-  }
-#endif
+  if (desc->nb_objects > 0)
+    ExportDmaBufSyncFence(desc->objects[0].fd, plbuf);
 
   drmBuf->ReleaseDescriptor();
   plbuf.loaded = true;
@@ -1703,10 +1712,7 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
       if (sw.tex[n] == 0)
         glGenTextures(1, &sw.tex[n]);
       glBindTexture(GL_TEXTURE_2D, sw.tex[n]);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      SetTextureDefaults(GL_TEXTURE_2D);
       glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(iformat), planeW, planeH, 0, glFormat,
                    glType, nullptr);
       glBindTexture(GL_TEXTURE_2D, 0);
@@ -1791,14 +1797,7 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
     plbuf.planes[n].flipped = true;
   }
 
-  plbuf.colorSpace = {};
-  plbuf.colorRepr = {};
-  plbuf.colorSpace.primaries = pl_primaries_from_av(buf.m_srcPrimaries);
-  plbuf.colorSpace.transfer = pl_transfer_from_av(buf.m_srcColTransfer);
-  plbuf.colorRepr.sys = pl_system_from_av(buf.m_srcColSpace);
-  if (plbuf.colorRepr.sys == PL_COLOR_SYSTEM_UNKNOWN)
-    plbuf.colorRepr.sys = pl_color_system_guess_ycbcr(this->m_sourceWidth, this->m_sourceHeight);
-  plbuf.colorRepr.levels = buf.m_srcFullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+  SetSourceColorSpace(plbuf, buf, /*isYCbCr=*/true);
   plbuf.colorRepr.bits = bits;
 
   PL::ApplyHdrMetadata(plbuf.colorSpace, plbuf.colorRepr, plbuf.doviMetadata, buf);
