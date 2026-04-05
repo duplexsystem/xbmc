@@ -81,15 +81,21 @@ bool CWinSystemWaylandEGLContextGLES::InitWindowSystem()
 
 bool CWinSystemWaylandEGLContextGLES::CreateContext()
 {
-  CEGLAttributesVec contextAttribs;
-  contextAttribs.Add({{EGL_CONTEXT_CLIENT_VERSION, 2}});
-
-  if (!m_eglContext.CreateContext(contextAttribs))
+  // Try GLES 3.1 first — needed for compute shaders and SSBOs in libplacebo
+  // (peak detection, error diffusion). Fall back to 3.0 then 2.0.
+  for (int version : {3, 2})
   {
-    CLog::Log(LOGERROR, "EGL context creation failed");
-    return false;
+    CEGLAttributesVec contextAttribs;
+    contextAttribs.Add({{EGL_CONTEXT_CLIENT_VERSION, version}});
+    if (m_eglContext.CreateContext(contextAttribs))
+    {
+      CLog::Log(LOGINFO, "CWinSystemWaylandEGLContextGLES: created GLES {} context", version);
+      return true;
+    }
   }
-  return true;
+
+  CLog::Log(LOGERROR, "EGL context creation failed");
+  return false;
 }
 
 void CWinSystemWaylandEGLContextGLES::SetContextSize(CSizeInt size)
