@@ -114,6 +114,10 @@ protected:
   [[nodiscard]] virtual GLenum GetVaapiTexTarget() const = 0;
   [[nodiscard]] virtual EGLDisplay GetDRMPRIMEEGLDisplay() const = 0;
 
+  // libplacebo per-pass render info callback.  Logs shader description and
+  // GPU execution time for each pass when LOGVIDEO debug logging is enabled.
+  static void PlRenderInfoCallback(void* priv, const struct pl_render_info* info);
+
 private:
   // Maximum number of VAAPI layers / DRM planes we handle.
   static constexpr uint32_t kMaxPlanes = 3;
@@ -789,6 +793,35 @@ void CLinuxRendererPLBase<TBase>::UpdateVideoFilter()
   const pl_render_params& params = m_plConfig->GetOptions()->params;
   m_queueNeeded =
       (pl_frame_mix_radius(&params) > 0.0f) || (params.deinterlace_params != nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// PlRenderInfoCallback — per-pass GPU timing for diagnostics
+// ---------------------------------------------------------------------------
+
+template<typename TBase>
+void CLinuxRendererPLBase<TBase>::PlRenderInfoCallback(void* /*priv*/,
+                                                       const struct pl_render_info* info)
+{
+  if (!CServiceBroker::GetLogging().CanLogComponent(LOGVIDEO))
+    return;
+
+  const char* stage = (info->stage == PL_RENDER_STAGE_FRAME) ? "frame" : "blend";
+  const char* desc = info->pass->shader ? info->pass->shader->description : "?";
+
+  if (info->pass->num_samples > 0)
+  {
+    CLog::Log(LOGDEBUG, LOGVIDEO,
+              "libplacebo pass [{}/{}]: {:6.3f} ms (avg {:6.3f} ms, peak {:6.3f} ms) — {}",
+              stage, info->index, static_cast<double>(info->pass->last) / 1e6,
+              static_cast<double>(info->pass->average) / 1e6,
+              static_cast<double>(info->pass->peak) / 1e6, desc);
+  }
+  else
+  {
+    CLog::Log(LOGDEBUG, LOGVIDEO, "libplacebo pass [{}/{}]: (no timing) — {}", stage,
+              info->index, desc);
+  }
 }
 
 template<typename TBase>
@@ -2104,6 +2137,10 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   // data is present — disable it to save a full GPU pass on every DV frame.
   if (plbuf.colorRepr.dovi != nullptr)
     params.peak_detect_params = nullptr;
+
+  // Per-pass GPU timing — only active when LOGVIDEO debug logging is enabled.
+  params.info_callback = PlRenderInfoCallback;
+  params.info_priv = nullptr;
 
   // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
   // a pass early.  Skipped when the context was created with GL_KHR_no_error
