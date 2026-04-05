@@ -19,8 +19,6 @@
 #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h"
 #include "cores/VideoPlayer/VideoRenderers/VideoShaders/ShaderFormats.h"
-#include "filesystem/File.h"
-#include "settings/Settings.h"
 #include "utils/HDRCapabilities.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
@@ -329,7 +327,7 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
     ReleasePLBuffer(i);
     ReleaseSWBuffer(i);
   }
-  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
   for (auto& cache : m_drmTexCache)
   {
     if (cache.tex)
@@ -755,7 +753,7 @@ void CLinuxRendererPLBase<TBase>::DeleteTexture(int index)
   }
   {
     auto& pc = m_drmPlaneCache[index];
-    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+    const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
     for (int n = 0; n < pc.numPlanes; ++n)
     {
       if (pc.plTex[n])
@@ -829,7 +827,7 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
     return false;
   }
 
-  VADisplay vadsp = vaaPic->vadsp;
+  const VADisplay vadsp = vaaPic->vadsp;
   // Synchronize the VAAPI surface before we import its DMA-bufs.
   //
   // Priority order (best → worst):
@@ -1116,7 +1114,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   }
 
   const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
-  GLuint glTex = m_drmTextures[index].GetTexture();
+  const GLuint glTex = m_drmTextures[index].GetTexture();
   const CSizeInt sz = m_drmTextures[index].GetTextureSize();
 
   // Reuse cached pl_tex wrapper when the underlying GL texture and dimensions
@@ -1141,7 +1139,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
     // the actual pixel format internally. libplacebo cannot map format-specific
     // ifomats (GL_RGB10_A2, GL_RGBA16F) for external OES targets. Pass GL_RGBA8
     // for all bit depths; actual precision is carried via color metadata.
-    wp.iformat = GL_RGBA8;
+    wp.iformat = static_cast<int>(GL_RGBA8);
     wp.width = sz.Width();
     wp.height = sz.Height();
 
@@ -1201,7 +1199,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   //
   // Skipped when m_hasEGLModifiers is true: in that case eglCreateImageKHR
   // (called inside CDRMPRIMETexture::Map above) already attached the DMA-buf
-  // reservation fence implicitly — adding an explicit explicit sync is redundant.
+  // reservation fence implicitly — adding an explicit sync is redundant.
   if (m_hasEGLSyncFence && !m_hasEGLModifiers)
   {
     const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
@@ -1213,14 +1211,12 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
       if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
           syncExport.fd >= 0)
       {
-        EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
+        const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
         plbuf.eglSyncFence =
             m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
 
         if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
-        {
           close(syncExport.fd);
-        }
       }
     }
   }
@@ -1298,7 +1294,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     return false;
   }
 
-  AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
+  const AVDRMFrameDescriptor* desc = drmBuf->GetDescriptor();
   if (!desc || desc->nb_layers == 0)
   {
     CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadDRMPRIMEPlanes - no layers in descriptor");
@@ -1306,7 +1302,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
     return false;
   }
 
-  AVDRMLayerDescriptor* layer = &desc->layers[0];
+  const AVDRMLayerDescriptor* layer = &desc->layers[0];
   const int numPlanes = layer->nb_planes;
   const int fullW = static_cast<int>(drmBuf->GetWidth());
   const int fullH = static_cast<int>(drmBuf->GetHeight());
@@ -1549,7 +1545,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIMEPlanes(int index, PLBuffer& plbu
       if (ioctl(desc->objects[0].fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &syncExport) == 0 &&
           syncExport.fd >= 0)
       {
-        EGLint syncAttribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
+        const EGLint syncAttribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, syncExport.fd, EGL_NONE};
         plbuf.eglSyncFence =
             m_eglCreateSyncKHR(m_eglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, syncAttribs);
         if (plbuf.eglSyncFence == EGL_NO_SYNC_KHR)
@@ -1674,7 +1670,7 @@ bool CLinuxRendererPLBase<TBase>::UploadSoftware(int index, PLBuffer& plbuf)
   const int chromaShiftW = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_w) : 1;
   const int chromaShiftH = fmtDesc ? static_cast<int>(fmtDesc->log2_chroma_h) : 1;
 
-  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
 
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
@@ -1826,8 +1822,8 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     return false;
 
   const auto plInst = PL::PLInstance::Get();
-  pl_gpu gpu = plInst->GetGpu();
-  pl_renderer renderer = plInst->GetRenderer();
+  const pl_gpu gpu = plInst->GetGpu();
+  const pl_renderer renderer = plInst->GetRenderer();
 
   // Build input frame (used as fallback if the queue path doesn't fire)
   pl_frame frameIn{};
@@ -1848,8 +1844,8 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   // Without this, zoom, pixel ratio, and stretch features have no effect on the
   // source side — the entire texture is always rendered into the destination rect.
   frameIn.crop = {src.x1, src.y1, src.x2, src.y2};
-  int viewW = static_cast<int>(view.Width());
-  int viewH = static_cast<int>(view.Height());
+  const int viewW = static_cast<int>(view.Width());
+  const int viewH = static_cast<int>(view.Height());
   if (viewW <= 0 || viewH <= 0)
     return false;
 
@@ -1895,7 +1891,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     wrapParams.framebuffer = fboId;
     wrapParams.width = viewW;
     wrapParams.height = viewH;
-    wrapParams.iformat = fboIformat;
+    wrapParams.iformat = static_cast<int>(fboIformat);
 
     m_cachedFboTex = pl_opengl_wrap(gpu, &wrapParams);
     if (!m_cachedFboTex)
@@ -2136,7 +2132,7 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
       plbuf.eglSyncFence = EGL_NO_SYNC_KHR;
     }
 
-    pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+    const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
     for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
     {
       if (plbuf.tex[n])
@@ -2201,7 +2197,7 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
   // frames (the underlying GL texture ID is stable). Don't destroy it here — just
   // null the slot so the render pipeline won't reference a stale frame.
   // For software-decode textures (no cache), destroy normally.
-  pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+  const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
   for (int n = 0; n < plbuf.num_planes; ++n)
   {
     if (plbuf.tex[n])
