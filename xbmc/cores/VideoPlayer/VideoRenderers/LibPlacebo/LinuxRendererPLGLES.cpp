@@ -28,26 +28,28 @@
 
 CBaseRenderer* CLinuxRendererPLGLES::Create(CVideoBuffer* buffer)
 {
-  if (!buffer)
-    return nullptr;
-
-  bool isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(buffer) != nullptr);
-#if defined(HAVE_LIBVA)
-  bool isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(buffer) != nullptr);
-#else
-  constexpr bool isVAAPI = false;
-#endif
-  pl_bit_encoding bits{};
-  pl_plane_data pdata[4]{};
-  bool isSW = (pl_plane_data_from_pixfmt(pdata, &bits, buffer->GetFormat()) > 0);
-
-  if (!isDRMPRIME && !isVAAPI && !isSW)
+  // buffer is null during PreInit (before the codec is open). Accept it —
+  // the buffer format will be validated later in Configure().
+  if (buffer)
   {
-    CLog::Log(
-        LOGDEBUG,
-        "CLinuxRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
-        static_cast<int>(buffer->GetFormat()));
-    return nullptr;
+    bool isDRMPRIME = (dynamic_cast<CVideoBufferDRMPRIME*>(buffer) != nullptr);
+#if defined(HAVE_LIBVA)
+    bool isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(buffer) != nullptr);
+#else
+    constexpr bool isVAAPI = false;
+#endif
+    pl_bit_encoding bits{};
+    pl_plane_data pdata[4]{};
+    bool isSW = (pl_plane_data_from_pixfmt(pdata, &bits, buffer->GetFormat()) > 0);
+
+    if (!isDRMPRIME && !isVAAPI && !isSW)
+    {
+      CLog::Log(
+          LOGDEBUG,
+          "CLinuxRendererPLGLES::Create - buffer format {} not supported by libplacebo, skipping",
+          static_cast<int>(buffer->GetFormat()));
+      return nullptr;
+    }
   }
 
   auto* inst = PL::PLInstance::Get().get();
