@@ -187,6 +187,13 @@ void CWinSystemGbmGLESContext::PresentRender(bool rendered, bool videoLayer)
   }
 }
 
+void CWinSystemGbmGLESContext::SetVSyncImpl(bool /*enable*/)
+{
+  // DRM atomic commits handle page flip timing; disable EGL vsync blocking
+  // to prevent double-buffering contention with Kodi's own frame pacing.
+  m_eglContext.SetVSync(false);
+}
+
 bool CWinSystemGbmGLESContext::CreateContext()
 {
   // Try GLES 3.1 first — needed for compute shaders and SSBOs in libplacebo

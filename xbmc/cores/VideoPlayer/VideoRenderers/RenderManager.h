@@ -227,8 +227,6 @@ protected:
   struct CClockSync
   {
     void Reset();
-    double m_error;
-    int m_errCount;
     double m_syncOffset;
     bool m_enabled;
   };

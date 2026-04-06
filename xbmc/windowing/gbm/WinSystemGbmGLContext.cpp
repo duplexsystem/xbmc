@@ -178,6 +178,13 @@ void CWinSystemGbmGLContext::PresentRender(bool rendered, bool videoLayer)
   }
 }
 
+void CWinSystemGbmGLContext::SetVSyncImpl(bool /*enable*/)
+{
+  // DRM atomic commits handle page flip timing; disable EGL vsync blocking
+  // to prevent double-buffering contention with Kodi's own frame pacing.
+  m_eglContext.SetVSync(false);
+}
+
 bool CWinSystemGbmGLContext::CreateContext()
 {
   const EGLint glMajor = 3;

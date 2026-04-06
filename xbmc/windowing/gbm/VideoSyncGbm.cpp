@@ -18,6 +18,7 @@
 #include "windowing/gbm/WinSystemGbm.h"
 
 #include <assert.h>
+#include <cerrno>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -75,9 +76,21 @@ bool CVideoSyncGbm::Setup()
   return true;
 }
 
+void CVideoSyncGbm::SequenceHandler(int /*fd*/,
+                                    uint64_t sequence,
+                                    uint64_t ns,
+                                    uint64_t userData)
+{
+  auto* self = reinterpret_cast<CVideoSyncGbm*>(userData);
+  if (sequence > self->m_sequence)
+  {
+    self->m_refClock->UpdateClock(sequence - self->m_sequence, self->m_offset + ns);
+    self->m_sequence = sequence;
+  }
+}
+
 void CVideoSyncGbm::Run(CEvent& stopEvent)
 {
-  /* This shouldn't be very busy and timing is important so increase priority */
   CThread::GetCurrentThread()->SetPriority(ThreadPriority::ABOVE_NORMAL);
 
   if (m_fd < 0)
@@ -87,6 +100,60 @@ void CVideoSyncGbm::Run(CEvent& stopEvent)
   }
   CLog::Log(LOGDEBUG, "CVideoSyncGbm::{}: started {}", __FUNCTION__, m_fd);
 
+  // Try event-driven vsync via drmCrtcQueueSequence (kernel 4.15+).
+  // Falls back to usleep polling on older kernels.
+  uint64_t queued = 0;
+  if (drmCrtcQueueSequence(m_fd, m_crtcId,
+                           DRM_CRTC_SEQUENCE_RELATIVE | DRM_CRTC_SEQUENCE_NEXT_ON_MISS, 1,
+                           &queued, reinterpret_cast<uint64_t>(this)) == 0)
+  {
+    CLog::Log(LOGINFO, "CVideoSyncGbm::{}: using event-driven vsync", __FUNCTION__);
+    RunEventDriven(stopEvent);
+  }
+  else
+  {
+    CLog::Log(LOGINFO, "CVideoSyncGbm::{}: drmCrtcQueueSequence not supported, using polling",
+              __FUNCTION__);
+    RunPolling(stopEvent);
+  }
+}
+
+void CVideoSyncGbm::RunEventDriven(CEvent& stopEvent)
+{
+  drmEventContext evctx{};
+  evctx.version = DRM_EVENT_CONTEXT_VERSION;
+  evctx.sequence_handler = SequenceHandler;
+
+  struct pollfd pfd{};
+  pfd.fd = m_fd;
+  pfd.events = POLLIN;
+
+  while (!stopEvent.Signaled() && !m_abort)
+  {
+    int ret = poll(&pfd, 1, 100);
+    if (ret < 0)
+    {
+      if (errno == EINTR)
+        continue;
+      CLog::Log(LOGWARNING, "CVideoSyncGbm::{}: poll failed ({})", __FUNCTION__, errno);
+      break;
+    }
+    if (pfd.revents & (POLLHUP | POLLERR))
+      break;
+    if (pfd.revents & POLLIN)
+    {
+      drmHandleEvent(m_fd, &evctx);
+      // Queue next vblank event
+      uint64_t queued = 0;
+      drmCrtcQueueSequence(m_fd, m_crtcId,
+                           DRM_CRTC_SEQUENCE_RELATIVE | DRM_CRTC_SEQUENCE_NEXT_ON_MISS, 1,
+                           &queued, reinterpret_cast<uint64_t>(this));
+    }
+  }
+}
+
+void CVideoSyncGbm::RunPolling(CEvent& stopEvent)
+{
   while (!stopEvent.Signaled() && !m_abort)
   {
     uint64_t sequence = 0, ns = 0;

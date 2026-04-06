@@ -39,7 +39,7 @@ public:
   void PresentRender(bool rendered, bool videoLayer) override;
 
 protected:
-  void SetVSyncImpl(bool enable) override {}
+  void SetVSyncImpl(bool enable) override;
   void PresentRenderImpl(bool rendered) override {};
   bool CreateContext() override;
 };

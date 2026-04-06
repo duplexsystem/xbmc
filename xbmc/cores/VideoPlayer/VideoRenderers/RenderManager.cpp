@@ -34,8 +34,6 @@ using namespace std::chrono_literals;
 
 void CRenderManager::CClockSync::Reset()
 {
-  m_error = 0;
-  m_errCount = 0;
   m_syncOffset = 0;
   m_enabled = false;
 }
@@ -1057,7 +1055,7 @@ bool CRenderManager::AddVideoPicture(const VideoPicture& picture, volatile std::
     XbmcThreads::EndTime<> endtime(200ms);
     while (m_presentstep == PRESENT_READY)
     {
-      m_presentevent.wait(lock, 20ms);
+      m_presentevent.wait(lock, 5ms);
       if(endtime.IsTimePast() || bStop)
       {
         if (!bStop)
@@ -1183,17 +1181,10 @@ void CRenderManager::PrepareNextRender()
   if (m_clockSync.m_enabled)
   {
     double err = fmod(renderPts - nextFramePts, frametime);
-    m_clockSync.m_error += err;
-    m_clockSync.m_errCount ++;
-    if (m_clockSync.m_errCount > 30)
-    {
-      double average = m_clockSync.m_error / m_clockSync.m_errCount;
-      m_clockSync.m_syncOffset = average;
-      m_clockSync.m_error = 0;
-      m_clockSync.m_errCount = 0;
-
-      m_dvdClock.SetVsyncAdjust(-average);
-    }
+    // EMA with ~20-frame time constant (alpha=0.05). Adapts continuously
+    // instead of batching over 30 frames. Smoother than step adjustments.
+    m_clockSync.m_syncOffset += 0.05 * (err - m_clockSync.m_syncOffset);
+    m_dvdClock.SetVsyncAdjust(-m_clockSync.m_syncOffset);
     renderPts += frametime / 2 - m_clockSync.m_syncOffset;
   }
   else

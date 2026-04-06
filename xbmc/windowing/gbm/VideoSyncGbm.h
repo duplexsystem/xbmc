@@ -13,6 +13,8 @@
 
 #include <atomic>
 
+#include <poll.h>
+
 class CWinSystemBase;
 
 class CVideoSyncGbm : public CVideoSync, IDispResource
@@ -33,6 +35,11 @@ public:
   void OnResetDisplay() override;
 
 private:
+  void RunEventDriven(CEvent& stopEvent);
+  void RunPolling(CEvent& stopEvent);
+
+  static void SequenceHandler(int fd, uint64_t sequence, uint64_t ns, uint64_t userData);
+
   int m_fd = -1;
   uint32_t m_crtcId = 0;
   uint64_t m_sequence = 0;
