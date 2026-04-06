@@ -215,6 +215,26 @@ private:
   // GPU-side sync redundant for both VAAPI and DRMPRIME paths.
   bool m_hasEGLModifiers{false};
 
+#if defined(HAVE_LIBVA)
+  // Persistent per-slot cache for VAAPI textures.
+  // GL textures and pl_tex wrappers are created once (dimensions are stable for
+  // the entire video) and reused across frames.  Only the EGLImages change per
+  // frame — glEGLImageTargetTexture2DOES rebinds the existing GL texture to the
+  // new EGLImage.  Same pattern as DRMPlaneCache but for the VAAPI upload path.
+  struct VaapiCache
+  {
+    static constexpr int MAX_PLANES = kMaxPlanes;
+    GLuint glTex[MAX_PLANES]{};
+    pl_tex plTex[MAX_PLANES]{};
+    EGLImageKHR eglImage[MAX_PLANES]{EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};
+    int width[MAX_PLANES]{};
+    int height[MAX_PLANES]{};
+    int numPlanes{0};
+    bool initialized{false};
+  };
+  std::array<VaapiCache, NUM_BUFFERS> m_vaapiCache{};
+#endif
+
   // EGL context used globally for Sync objects and Image KHR
   EGLDisplay m_eglDisplay{EGL_NO_DISPLAY};
 
@@ -289,6 +309,14 @@ private:
   // error generation is disabled and glGetError() always returns GL_NO_ERROR.
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
+
+  // Cached per-session values that don't change between Configure() calls.
+  // Avoids virtual dispatch through CServiceBroker on every frame.
+  float m_cachedVsyncDuration{0.0f};
+  float m_cachedSdrPeakLuminance{0.0f};
+  bool m_cachedUseLimitedColor{false};
+  pl_color_space m_frameOutColor{};
+  pl_color_repr m_frameOutRepr{};
 
   // EGL_ANDROID_native_fence_sync: GPU-side DMA-buf fence wait.
   //
@@ -429,6 +457,23 @@ CLinuxRendererPLBase<TBase>::~CLinuxRendererPLBase()
       glDeleteTextures(pc.numPlanes, pc.glTex);
     pc = {};
   }
+#if defined(HAVE_LIBVA)
+  for (auto& vc : m_vaapiCache)
+  {
+    if (!vc.initialized)
+      continue;
+    for (int n = 0; n < vc.numPlanes; ++n)
+    {
+      if (vc.plTex[n])
+        pl_tex_destroy(gpu, &vc.plTex[n]);
+      if (vc.eglImage[n] != EGL_NO_IMAGE_KHR)
+        m_eglDestroyImageKHR(m_eglDisplay, vc.eglImage[n]);
+    }
+    if (vc.numPlanes > 0)
+      glDeleteTextures(vc.numPlanes, vc.glTex);
+    vc = {};
+  }
+#endif
   if (m_plQueue)
   {
     pl_queue_destroy(&m_plQueue);
@@ -524,6 +569,38 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
     m_displayHDRCaps = CServiceBroker::GetWinSystem()->GetDisplayHDRCapabilities();
   else
     m_displayHDRCaps = {};
+
+  // Cache per-session windowing values used every frame in RenderHook.
+  // These only change on resolution/display switch (which triggers reconfigure).
+  m_cachedVsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+  m_cachedSdrPeakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
+  m_cachedUseLimitedColor = CServiceBroker::GetWinSystem()->UseLimitedColor();
+
+  // Pre-build output frame color/repr template. Most fields are session-stable;
+  // only HDR transfer (PQ vs HLG) may vary per-frame in passthrough mode.
+  m_frameOutColor = {};
+  m_frameOutRepr = {};
+  if (this->m_passthroughHDR)
+  {
+    m_frameOutColor.primaries = PL_COLOR_PRIM_BT_2020;
+    // Transfer is set per-frame in RenderHook (PQ vs HLG depends on source).
+    if (m_displayHDRCaps.GetDisplayMaxLuminance() > 0.0f)
+    {
+      m_frameOutColor.hdr.max_luma = m_displayHDRCaps.GetDisplayMaxLuminance();
+      if (m_displayHDRCaps.GetDisplayMinLuminance() > 0.0f)
+        m_frameOutColor.hdr.min_luma = m_displayHDRCaps.GetDisplayMinLuminance();
+    }
+  }
+  else
+  {
+    m_frameOutColor.primaries = PL_COLOR_PRIM_BT_709;
+    m_frameOutColor.transfer = PL_COLOR_TRC_BT_1886;
+    if (m_cachedSdrPeakLuminance > 0.0f)
+      m_frameOutColor.hdr.max_luma = m_cachedSdrPeakLuminance;
+  }
+  m_frameOutRepr.sys = PL_COLOR_SYSTEM_RGB;
+  m_frameOutRepr.levels =
+      m_cachedUseLimitedColor ? PL_COLOR_LEVELS_LIMITED : PL_COLOR_LEVELS_FULL;
 
   // Invalidate CMS state: source primaries may have changed and we are about
   // to render a new video source.
@@ -886,6 +963,25 @@ void CLinuxRendererPLBase<TBase>::DeleteTexture(int index)
       glDeleteTextures(pc.numPlanes, pc.glTex);
     pc = {};
   }
+#if defined(HAVE_LIBVA)
+  {
+    auto& vc = m_vaapiCache[index];
+    if (vc.initialized)
+    {
+      const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
+      for (int n = 0; n < vc.numPlanes; ++n)
+      {
+        if (vc.plTex[n])
+          pl_tex_destroy(gpu, &vc.plTex[n]);
+        if (vc.eglImage[n] != EGL_NO_IMAGE_KHR)
+          m_eglDestroyImageKHR(m_eglDisplay, vc.eglImage[n]);
+      }
+      if (vc.numPlanes > 0)
+        glDeleteTextures(vc.numPlanes, vc.glTex);
+      vc = {};
+    }
+  }
+#endif
   GLuint dummyTex = this->m_buffers[index].fields[0][0].id; // 0 == FIELD_FULL
   if (dummyTex > 0)
     glDeleteTextures(1, &dummyTex);
@@ -1021,7 +1117,10 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
   const int chromaWDiv = chroma.widthDiv;
   const int chromaHDiv = chroma.heightDiv;
 
-  glGenTextures(static_cast<GLsizei>(numLayers), plbuf.vaapiGLTex);
+  VaapiCache& cache = m_vaapiCache[index];
+  const bool firstFrame = !cache.initialized;
+  if (firstFrame)
+    glGenTextures(static_cast<GLsizei>(numLayers), cache.glTex);
 
   for (uint32_t i = 0; i < numLayers && success; ++i)
   {
@@ -1035,14 +1134,21 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
         (i == 0) ? static_cast<EGLint>(desc.height)
                  : (static_cast<EGLint>(desc.height) + chromaHDiv - 1) / chromaHDiv;
 
+    // Destroy the previous frame's EGLImage (no-op on first frame)
+    if (cache.eglImage[i] != EGL_NO_IMAGE_KHR)
+    {
+      m_eglDestroyImageKHR(m_eglDisplay, cache.eglImage[i]);
+      cache.eglImage[i] = EGL_NO_IMAGE_KHR;
+    }
+
     EGLint attribs[kDmaBufEGLAttribsSize];
     BuildDmaBufEGLAttribs(attribs, layer.drm_format, planeW, planeH, object.fd,
                           static_cast<int>(layer.offset[0]), static_cast<int>(layer.pitch[0]),
                           object.drm_format_modifier);
 
-    EGLImageKHR eglImage =
+    cache.eglImage[i] =
         m_eglCreateImageKHR(m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
-    if (!eglImage)
+    if (!cache.eglImage[i])
     {
       CLog::Log(LOGERROR,
                 "CLinuxRendererPLBase::UploadVAAPI - eglCreateImageKHR failed for plane {} "
@@ -1051,54 +1157,86 @@ bool CLinuxRendererPLBase<TBase>::UploadVAAPI(int index, PLBuffer& plbuf)
       success = false;
       break;
     }
-    plbuf.vaapiEGLImage[i] = eglImage;
+    // Also store in plbuf for ReleasePLBuffer's EGLImage cleanup path
+    plbuf.vaapiEGLImage[i] = cache.eglImage[i];
 
-    glBindTexture(vaapiTexTarget, plbuf.vaapiGLTex[i]);
-    SetTextureDefaults(vaapiTexTarget);
-    if (m_hasEGLImageStorage)
-      m_glEGLImageTargetTexStorageEXT(vaapiTexTarget, eglImage, nullptr);
-    else
-      m_glEGLImageTargetTexture2DOES(vaapiTexTarget, eglImage);
+    glBindTexture(vaapiTexTarget, cache.glTex[i]);
 
-    GLenum glIformat = DrmFormatToGLIformat(layer.drm_format);
+    if (firstFrame)
+      SetTextureDefaults(vaapiTexTarget);
+
+    // Always use glEGLImageTargetTexture2DOES (mutable path) — cannot use
+    // TexStorage because immutable-format textures cannot be rebound to a
+    // different EGLImage on subsequent frames.
+    m_glEGLImageTargetTexture2DOES(vaapiTexTarget, cache.eglImage[i]);
+
+    if (firstFrame)
+    {
+      GLenum glIformat = DrmFormatToGLIformat(layer.drm_format);
 #ifdef DRM_FORMAT_P030
-    // P030: 10-bit packed (3×10 in 32-bit word). The driver exports it as a
-    // single DRM format per layer; map luma as R16, chroma as RG16 so
-    // libplacebo sees the correct container width. Bit depth is conveyed
-    // via pl_bit_encoding.
-    if (layer.drm_format == DRM_FORMAT_P030)
-      glIformat = (i == 0) ? GL_R16 : GL_RG16;
+      if (layer.drm_format == DRM_FORMAT_P030)
+        glIformat = (i == 0) ? GL_R16 : GL_RG16;
 #endif
-    if (glIformat == 0)
-    {
-      CLog::Log(LOGERROR,
-                "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
-                layer.drm_format, i);
-      success = false;
-      break;
-    }
+      if (glIformat == 0)
+      {
+        CLog::Log(LOGERROR,
+                  "CLinuxRendererPLBase::UploadVAAPI - unsupported DRM fourcc 0x{:x} for plane {}",
+                  layer.drm_format, i);
+        success = false;
+        break;
+      }
 
-    pl_opengl_wrap_params wp{};
-    wp.texture = plbuf.vaapiGLTex[i];
-    wp.target = vaapiTexTarget; // GL_TEXTURE_2D (desktop) or GL_TEXTURE_EXTERNAL_OES (GLES)
-    wp.iformat = static_cast<int>(glIformat);
-    wp.width = planeW;
-    wp.height = planeH;
+      pl_opengl_wrap_params wp{};
+      wp.texture = cache.glTex[i];
+      wp.target = vaapiTexTarget;
+      wp.iformat = static_cast<int>(glIformat);
+      wp.width = planeW;
+      wp.height = planeH;
 
-    plbuf.tex[i] = pl_opengl_wrap(gpu, &wp);
-    if (!plbuf.tex[i])
-    {
-      CLog::Log(LOGERROR, "CLinuxRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}",
-                i);
-      success = false;
+      cache.plTex[i] = pl_opengl_wrap(gpu, &wp);
+      if (!cache.plTex[i])
+      {
+        CLog::Log(LOGERROR,
+                  "CLinuxRendererPLBase::UploadVAAPI - pl_opengl_wrap failed for plane {}", i);
+        success = false;
+      }
+      cache.width[i] = planeW;
+      cache.height[i] = planeH;
     }
   }
 
   if (!success)
   {
+    if (firstFrame)
+    {
+      for (uint32_t n = 0; n < numLayers; ++n)
+      {
+        if (cache.plTex[n])
+          pl_tex_destroy(gpu, &cache.plTex[n]);
+        if (cache.eglImage[n] != EGL_NO_IMAGE_KHR)
+          m_eglDestroyImageKHR(m_eglDisplay, cache.eglImage[n]);
+        cache.eglImage[n] = EGL_NO_IMAGE_KHR;
+        plbuf.vaapiEGLImage[n] = EGL_NO_IMAGE_KHR;
+      }
+      glDeleteTextures(static_cast<GLsizei>(numLayers), cache.glTex);
+      cache = {};
+    }
     ReleasePLBuffer(index);
     return false;
   }
+
+  if (firstFrame)
+  {
+    cache.numPlanes = static_cast<int>(numLayers);
+    cache.initialized = true;
+  }
+
+  // Copy cached pl_tex pointers into the per-frame PLBuffer
+  for (int i = 0; i < cache.numPlanes; ++i)
+    plbuf.tex[i] = cache.plTex[i];
+  // Copy GL tex IDs for ReleasePLBuffer compatibility
+  for (int i = 0; i < cache.numPlanes; ++i)
+    plbuf.vaapiGLTex[i] = cache.glTex[i];
 
   plbuf.num_planes = static_cast<int>(numLayers);
   SetYCbCrPlaneMapping(plbuf, plbuf.num_planes, /*planarChroma=*/false);
@@ -2066,43 +2204,20 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   frameOut.planes[0].component_mapping[3] = PL_CHANNEL_NONE;
   frameOut.crop = {dst.x1, dst.y1, dst.x2, dst.y2};
 
+  // Use pre-built output color/repr from Configure(). Only HDR transfer is per-frame.
+  frameOut.color = m_frameOutColor;
+  frameOut.repr = m_frameOutRepr;
   if (this->m_passthroughHDR)
   {
     const auto& buf = this->m_buffers[idx];
-    frameOut.color.primaries = PL_COLOR_PRIM_BT_2020;
     frameOut.color.transfer =
         (buf.m_srcColTransfer == AVCOL_TRC_ARIB_STD_B67) ? PL_COLOR_TRC_HLG : PL_COLOR_TRC_PQ;
-
-    // Set the display's actual peak luminance from EDID so libplacebo knows
-    // the output capability. Without this, max_luma=0 causes libplacebo to
-    // infer 203 nits (PL_COLOR_SDR_WHITE) via pl_color_transfer_nominal_peak
-    // and tone-map all HDR content down to SDR levels.
-    if (m_displayHDRCaps.GetDisplayMaxLuminance() > 0.0f)
-    {
-      frameOut.color.hdr.max_luma = m_displayHDRCaps.GetDisplayMaxLuminance();
-      if (m_displayHDRCaps.GetDisplayMinLuminance() > 0.0f)
-        frameOut.color.hdr.min_luma = m_displayHDRCaps.GetDisplayMinLuminance();
-    }
-  }
-  else
-  {
-    frameOut.color.primaries = PL_COLOR_PRIM_BT_709;
-    frameOut.color.transfer = PL_COLOR_TRC_BT_1886;
-
-    // SDR display peak luminance for tone-mapping HDR→SDR output.
-    const float peakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
-    if (peakLuminance > 0.0f)
-      frameOut.color.hdr.max_luma = peakLuminance;
   }
   // Jointly infer source and destination color spaces. This is the canonical
   // libplacebo approach (matches mpv's vo_gpu_next): it infers src first, then
   // dst using src as reference, and coordinates SDR contrast (min_luma) between
   // them. For HLG→HDR, it also tunes the HLG source peak to the display peak.
   pl_color_space_infer_map(&frameIn.color, &frameOut.color);
-
-  frameOut.repr.sys = PL_COLOR_SYSTEM_RGB;
-  frameOut.repr.levels = CServiceBroker::GetWinSystem()->UseLimitedColor() ? PL_COLOR_LEVELS_LIMITED
-                                                                           : PL_COLOR_LEVELS_FULL;
 
   // CMS (ICC profile / 3D LUT) is SDR colour management.  Do not apply it when
   // the output frame is in HDR passthrough mode (PQ/HLG transfer) — libplacebo
@@ -2143,9 +2258,14 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   if ((src.x2 - src.x1) <= (dst.x2 - dst.x1) && (src.y2 - src.y1) <= (dst.y2 - dst.y1))
     params.skip_anti_aliasing = true;
 
-  // Per-pass GPU timing — only active when LOGVIDEO debug logging is enabled.
-  params.info_callback = PlRenderInfoCallback;
-  params.info_priv = nullptr;
+  // Per-pass GPU timing — only set when LOGVIDEO debug logging is enabled.
+  // On tile-based GPUs (V3D, Mali), a non-null info_callback enables timer
+  // queries (glBeginQuery/glEndQuery per pass) that force partial tile flushes.
+  if (CServiceBroker::GetLogging().CanLogComponent(LOGVIDEO))
+  {
+    params.info_callback = PlRenderInfoCallback;
+    params.info_priv = nullptr;
+  }
 
   // Drain any pre-existing GL errors so libplacebo's gl_check_err doesn't abort
   // a pass early.  Skipped when the context was created with GL_KHR_no_error
@@ -2210,7 +2330,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   if (m_plQueue && m_queueNeeded && m_queuePtsOffsetSet)
   {
     const auto& buf = this->m_buffers[idx];
-    const float vsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+    const float vsyncDuration = m_cachedVsyncDuration;
 
     pl_queue_params qparams{};
     qparams.pts = buf.pts - m_queuePtsOffset;
@@ -2241,9 +2361,10 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
       CLog::Log(LOGWARNING, "CLinuxRendererPLBase::RenderHook - pl_render_image failed");
   }
 
-  // Restore framebuffer: gl_tex_blit resets both bindings to 0 after every blit.
+  // Restore draw framebuffer: libplacebo's gl_tex_blit resets it to 0.
+  // GL_READ_FRAMEBUFFER is left at 0 (default) — Kodi's overlay/GUI code
+  // uses GL_FRAMEBUFFER which only binds DRAW on GLES 3.0+.
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, currentFbo);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
   glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
   if (scissorWasEnabled)
@@ -2291,24 +2412,21 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
       plbuf.eglSyncFence = EGL_NO_SYNC_KHR;
     }
 
-    const pl_gpu gpu = PL::PLInstance::Get()->m_plGpu;
-    for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiGLTex)); ++n)
+    // VAAPI cache owns GL textures and pl_tex wrappers — only release EGLImages
+    // and close exported DMA-buf fds. Null per-frame slots so the render pipeline
+    // won't reference stale data.
+    VaapiCache& vc = m_vaapiCache[index];
+    for (int n = 0; n < static_cast<int>(std::size(plbuf.vaapiEGLImage)); ++n)
     {
-      if (plbuf.tex[n])
-      {
-        pl_tex_destroy(gpu, &plbuf.tex[n]);
-        plbuf.tex[n] = nullptr;
-      }
-      if (plbuf.vaapiGLTex[n])
-      {
-        glDeleteTextures(1, &plbuf.vaapiGLTex[n]);
-        plbuf.vaapiGLTex[n] = 0;
-      }
       if (plbuf.vaapiEGLImage[n] != EGL_NO_IMAGE_KHR)
       {
         m_eglDestroyImageKHR(m_eglDisplay, plbuf.vaapiEGLImage[n]);
         plbuf.vaapiEGLImage[n] = EGL_NO_IMAGE_KHR;
+        if (vc.initialized && n < vc.numPlanes)
+          vc.eglImage[n] = EGL_NO_IMAGE_KHR;
       }
+      plbuf.tex[n] = nullptr; // cache owns it
+      plbuf.vaapiGLTex[n] = 0; // cache owns it
       plbuf.planes[n] = {};
     }
     for (int f = 0; f < plbuf.vaapiNumFds; ++f)
