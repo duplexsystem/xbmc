@@ -2138,6 +2138,11 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   if (plbuf.colorRepr.dovi != nullptr)
     params.peak_detect_params = nullptr;
 
+  // Anti-aliasing only matters when downscaling; skip the extra shader work
+  // when the source fits within the destination rect.
+  if ((src.x2 - src.x1) <= (dst.x2 - dst.x1) && (src.y2 - src.y1) <= (dst.y2 - dst.y1))
+    params.skip_anti_aliasing = true;
+
   // Per-pass GPU timing — only active when LOGVIDEO debug logging is enabled.
   params.info_callback = PlRenderInfoCallback;
   params.info_priv = nullptr;
