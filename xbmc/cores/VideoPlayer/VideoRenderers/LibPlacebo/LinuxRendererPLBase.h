@@ -256,7 +256,6 @@ private:
   // True when frame mixing or deinterlacing is active, meaning the queue
   // path (pl_render_image_mix) should be used.  When false, the queue
   // push/update cycle is skipped and pl_render_image is used directly.
-  bool m_queueNeeded{false};
 
   // Cached GL framebuffer → pl_tex wrapper.
   // pl_opengl_wrap/pl_tex_destroy for a framebuffer flushes GPU command queues on
@@ -311,6 +310,10 @@ private:
   // and crop are patched per frame.  Saves a pl_frame zero-init + the
   // pl_frame_set_chroma_location call per render.
   pl_frame m_frameInTemplate{};
+
+  // Render-time diagnostic: measures wall-clock time per frame (including GPU
+  // finish) and logs avg/peak every 2 seconds.  Temporary — remove after
+  // identifying the periodic spike source.
 
   // EGL_ANDROID_native_fence_sync: GPU-side DMA-buf fence wait.
   //
@@ -723,7 +726,7 @@ void CLinuxRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, i
   TBase::AddVideoPicture(picture, index);
   m_plBuffers[index].loaded = false;
 
-  if (!m_plQueue || !m_queueNeeded || this->m_fps <= 0.0f)
+  if (!m_plQueue || this->m_fps <= 0.0f)
     return;
 
   if (!m_queuePtsOffsetSet)
@@ -873,15 +876,6 @@ void CLinuxRendererPLBase<TBase>::UpdateVideoFilter()
   TBase::UpdateVideoFilter();
   m_plConfig->UpdateVideoFilter(this->m_scalingMethod, this->m_videoSettings);
 
-  // Check whether the queue is needed.  pl_frame_mix_radius > 0 means frame
-  // mixing is active; deinterlace_params != nullptr means deinterlacing is
-  // enabled.  Temporal algorithms (yadif, bwdif) need prev/next frames that
-  // only pl_queue_update provides; bob is spatial-only but still benefits from
-  // the queue's field-timing logic.  HDR peak detection is per-frame and does
-  // not require the queue.
-  const pl_render_params& params = m_plConfig->GetOptions()->params;
-  m_queueNeeded =
-      (pl_frame_mix_radius(&params) > 0.0f) || (params.deinterlace_params != nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -2267,11 +2261,11 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
     m_pendingSyncSlots = 0;
   }
 
-  // Queue-based render path (provides prev/curr/next frames for BWDIF/YADIF
-  // and frame mixing/interpolation).  Skipped when mix radius is 0 — no
-  // adjacent frames needed, so the direct pl_render_image path is cheaper.
+  // Queue-based render path — always used (matches mpv's vo_gpu_next).
+  // pl_render_image_mix with radius=0 behaves like pl_render_image but
+  // benefits from the queue's frame signature tracking for cache reuse.
   bool rendered = false;
-  if (m_plQueue && m_queueNeeded && m_queuePtsOffsetSet)
+  if (m_plQueue && m_queuePtsOffsetSet)
   {
     const auto& buf = this->m_buffers[idx];
     const float vsyncDuration = m_cachedVsyncDuration;
