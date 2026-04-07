@@ -216,8 +216,8 @@ void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
   pl_options_set_str(
       m_plOpts, "peak_detect",
       settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_PEAKDETECT) ? "yes" : "no");
-  if (settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
-    pl_options_set_str(m_plOpts, "frame_mixer", "oversample");
+  if (!settings->GetBool(CSettings::SETTING_VIDEOPLAYER_LIBPLACEBO_FRAMEMIX))
+    pl_options_set_str(m_plOpts, "frame_mixer", "none");
 
   if (const char* filter = PL::KodiScalingToPlacebo(scalingMethod))
   {
