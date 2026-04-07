@@ -234,12 +234,6 @@ private:
   PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR{nullptr};
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC m_glEGLImageTargetTexture2DOES{nullptr};
 
-  // GL_EXT_EGL_image_storage: immutable-format texture from EGLImage.
-  // The driver can skip per-frame format validation and pre-compute tiling
-  // metadata, reducing CPU overhead on tile-based GPUs (V3D/RPi5, Mali, etc.).
-  PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC m_glEGLImageTargetTexStorageEXT{nullptr};
-  bool m_hasEGLImageStorage{false};
-
   AVPixelFormat m_format{AV_PIX_FMT_NONE};
   pl_color_space m_colorSpace{};
   pl_chroma_location m_chromaLocation{PL_CHROMA_UNKNOWN};
@@ -539,17 +533,6 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   // DMA-buf reservation fence to the EGLImage so the GPU waits automatically —
   // no explicit CPU stall or explicit sync is needed.
   m_hasEGLModifiers = (eglGetProcAddress("eglQueryDmaBufModifiersEXT") != nullptr);
-
-  // Probe GL_EXT_EGL_image_storage: immutable-format texture from EGLImage.
-  // Avoids per-frame format validation overhead vs glEGLImageTargetTexture2DOES.
-  {
-    auto* fn = eglGetProcAddress("glEGLImageTargetTexStorageEXT");
-    if (fn)
-    {
-      m_glEGLImageTargetTexStorageEXT = reinterpret_cast<PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC>(fn);
-      m_hasEGLImageStorage = true;
-    }
-  }
 
 #if defined(HAVE_LIBVA)
   m_isVAAPI = (dynamic_cast<VAAPI::CVaapiRenderPicture*>(picture.videoBuffer) != nullptr);
