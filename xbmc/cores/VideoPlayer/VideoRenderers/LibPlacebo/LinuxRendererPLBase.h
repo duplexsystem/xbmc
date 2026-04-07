@@ -245,17 +245,13 @@ private:
     int bufferIndex;
     CLinuxRendererPLBase* renderer;
   };
-  // libplacebo guarantees exactly one of unmap/discard is called per pushed frame.
-  // QueuedFrameState must be trivially destructible so raw delete is safe and
-  // no destructor side effects are silently skipped on the discard path.
-  static_assert(std::is_trivially_destructible_v<QueuedFrameState>);
+  // Pool of QueuedFrameState objects indexed by buffer slot.  Avoids per-frame
+  // heap allocation — each slot is reused after libplacebo calls unmap/discard.
+  std::array<QueuedFrameState, NUM_BUFFERS> m_queueFramePool{};
 
   pl_queue m_plQueue{nullptr};
   double m_queuePtsOffset{0.0};
   bool m_queuePtsOffsetSet{false};
-  // True when frame mixing or deinterlacing is active, meaning the queue
-  // path (pl_render_image_mix) should be used.  When false, the queue
-  // push/update cycle is skipped and pl_render_image is used directly.
 
   // Cached GL framebuffer → pl_tex wrapper.
   // pl_opengl_wrap/pl_tex_destroy for a framebuffer flushes GPU command queues on
@@ -298,6 +294,7 @@ private:
 
   // Cached per-session values that don't change between Configure() calls.
   // Avoids virtual dispatch through CServiceBroker on every frame.
+  double m_cachedFrameDuration{0.0};
   float m_cachedVsyncDuration{0.0f};
   float m_cachedSdrPeakLuminance{0.0f};
   bool m_cachedUseLimitedColor{false};
@@ -588,6 +585,7 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
 
   // Cache per-session windowing values used every frame in RenderHook.
   // These only change on resolution/display switch (which triggers reconfigure).
+  m_cachedFrameDuration = (fps > 0.0f) ? 1.0 / static_cast<double>(fps) : 0.0;
   m_cachedVsyncDuration = 1.0f / CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
   m_cachedSdrPeakLuminance = CServiceBroker::GetWinSystem()->GetGuiSdrPeakLuminance();
   m_cachedUseLimitedColor = CServiceBroker::GetWinSystem()->UseLimitedColor();
@@ -735,11 +733,13 @@ void CLinuxRendererPLBase<TBase>::AddVideoPicture(const VideoPicture& picture, i
     m_queuePtsOffsetSet = true;
   }
 
-  auto* qf = new QueuedFrameState{index, this};
+  auto* qf = &m_queueFramePool[index];
+  qf->bufferIndex = index;
+  qf->renderer = this;
 
   pl_source_frame src{};
   src.pts = picture.pts - m_queuePtsOffset;
-  src.duration = 1.0 / static_cast<double>(this->m_fps);
+  src.duration = m_cachedFrameDuration;
   if (picture.iFlags & DVP_FLAG_INTERLACED)
     src.first_field = (picture.iFlags & DVP_FLAG_TOP_FIELD_FIRST) ? PL_FIELD_TOP : PL_FIELD_BOTTOM;
   src.frame_data = qf;
@@ -800,13 +800,13 @@ void CLinuxRendererPLBase<TBase>::UnmapCallback(pl_gpu /*gpu*/,
                                                 const struct pl_source_frame* src)
 {
   // Textures remain in m_plBuffers and are freed by DeleteTexture / ReleasePLBuffer.
-  delete static_cast<QueuedFrameState*>(src->frame_data);
+  // QueuedFrameState lives in m_queueFramePool — no delete needed.
 }
 
 template<typename TBase>
-void CLinuxRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* src)
+void CLinuxRendererPLBase<TBase>::DiscardCallback(const struct pl_source_frame* /*src*/)
 {
-  delete static_cast<QueuedFrameState*>(src->frame_data);
+  // QueuedFrameState lives in m_queueFramePool — no delete needed.
 }
 
 // ---------------------------------------------------------------------------
@@ -2067,18 +2067,24 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   if (viewW <= 0 || viewH <= 0)
     return false;
 
-  GLint currentFbo = 0;
-  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFbo);
-  const auto fboId = static_cast<unsigned int>(currentFbo);
-
   // Re-wrap the framebuffer only when it changes.  pl_opengl_wrap/pl_tex_destroy
   // on every frame is expensive: some drivers flush pending GPU work at this point
   // and libplacebo discards cached per-target state, forcing a full re-initialization
   // on the next pl_render_image[_mix] call.
-  if (!m_cachedFboTex || fboId != m_cachedFboId || viewW != m_cachedFboW || viewH != m_cachedFboH)
+  //
+  // The GL FBO query (glGetIntegerv GL_FRAMEBUFFER_BINDING) is deferred into the
+  // re-wrap block: on tile-based GPUs (V3D) it serializes the command stream.
+  // On the fast path the cached FBO ID is reused — the FBO only changes on
+  // Flush/Configure (which clear m_cachedFboTex) or window resize (caught by
+  // the view width/height check).
+  if (!m_cachedFboTex || viewW != m_cachedFboW || viewH != m_cachedFboH)
   {
     if (m_cachedFboTex)
       pl_tex_destroy(gpu, &m_cachedFboTex);
+
+    GLint currentFbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFbo);
+    const auto fboId = static_cast<unsigned int>(currentFbo);
 
     // Query the actual internal format of the framebuffer color attachment so
     // libplacebo knows the real output precision. On HDR-capable compositors
@@ -2302,7 +2308,7 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   // Restore draw framebuffer: libplacebo's gl_tex_blit resets it to 0.
   // GL_READ_FRAMEBUFFER is left at 0 (default) — Kodi's overlay/GUI code
   // uses GL_FRAMEBUFFER which only binds DRAW on GLES 3.0+.
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, currentFbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_cachedFboId);
 
   glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
   if (scissorWasEnabled)
