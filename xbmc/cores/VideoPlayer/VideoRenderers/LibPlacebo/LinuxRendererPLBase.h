@@ -626,13 +626,6 @@ bool CLinuxRendererPLBase<TBase>::Configure(const VideoPicture& picture,
   m_frameOutRepr.levels =
       m_cachedUseLimitedColor ? PL_COLOR_LEVELS_LIMITED : PL_COLOR_LEVELS_FULL;
 
-  // Pre-build input frame template with session-stable fields.
-  // Planes, color, repr, and crop are patched per frame in RenderHook/MapCallback.
-  m_frameInTemplate = {};
-  pl_frame_set_chroma_location(&m_frameInTemplate, m_chromaLocation);
-  m_frameInTemplate.rotation = PL::RotationFromOrientation(this->m_renderOrientation);
-  m_frameInTemplate.field = PL_FIELD_NONE;
-
   // Invalidate CMS state: source primaries may have changed and we are about
   // to render a new video source.
   m_plConfig->ResetCmsState();
@@ -783,13 +776,13 @@ bool CLinuxRendererPLBase<TBase>::MapCallback(pl_gpu /*gpu*/,
   if (!plbuf.loaded)
     return false;
 
-  // Start from the pre-built template (rotation, chroma location, field).
-  *out = r->m_frameInTemplate;
   out->num_planes = plbuf.num_planes;
   for (int n = 0; n < plbuf.num_planes; ++n)
     out->planes[n] = plbuf.planes[n];
   out->color = plbuf.colorSpace;
   out->repr = plbuf.colorRepr;
+  pl_frame_set_chroma_location(out, r->m_chromaLocation);
+  out->rotation = PL::RotationFromOrientation(r->m_renderOrientation);
 
   // Set source crop so zoom/stretch/pixel ratio affect the source region.
   CRect srcRect, dstRect, viewRect;
@@ -2056,14 +2049,15 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   const pl_gpu gpu = plInst->GetGpu();
   const pl_renderer renderer = plInst->GetRenderer();
 
-  // Start from the pre-built template (rotation, chroma location, field are
-  // session-stable). Only patch per-frame fields: planes, color, repr, crop.
-  pl_frame frameIn = m_frameInTemplate;
+  pl_frame frameIn{};
   frameIn.num_planes = plbuf.num_planes;
   for (int n = 0; n < plbuf.num_planes; ++n)
     frameIn.planes[n] = plbuf.planes[n];
   frameIn.color = plbuf.colorSpace;
   frameIn.repr = plbuf.colorRepr;
+  pl_frame_set_chroma_location(&frameIn, m_chromaLocation);
+  frameIn.rotation = PL::RotationFromOrientation(this->m_renderOrientation);
+  frameIn.field = PL_FIELD_NONE;
 
   CRect src, dst, view;
   this->GetVideoRect(src, dst, view);
