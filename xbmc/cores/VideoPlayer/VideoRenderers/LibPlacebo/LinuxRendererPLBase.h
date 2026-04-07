@@ -290,6 +290,13 @@ private:
   // In that case we can skip the pre-render error drain entirely.
   bool m_glNoError{false};
 
+  // Per-slot upload cache: tracks the last successfully uploaded videoBuffer
+  // pointer for each buffer slot.  When the same slot is re-rendered with the
+  // same source buffer (24fps content at 60Hz display), UploadDRMPRIME skips
+  // the Unmap/Map/EGLImage cycle entirely — the existing EGLImage and pl_tex
+  // are still valid.  Cleared on ReleaseBuffer and Flush.
+  std::array<CVideoBuffer*, NUM_BUFFERS> m_lastUploadedBuffer{};
+
   // Cached per-session values that don't change between Configure() calls.
   // Avoids virtual dispatch through CServiceBroker on every frame.
   float m_cachedVsyncDuration{0.0f};
@@ -702,6 +709,8 @@ bool CLinuxRendererPLBase<TBase>::Flush(bool saveBuffers)
   m_cachedFboId = UINT_MAX;
   m_cachedFboW = 0;
   m_cachedFboH = 0;
+  // Force re-import on next render after a seek/stop.
+  m_lastUploadedBuffer.fill(nullptr);
   // VAO is stable across seeks; no need to invalidate m_kodiVaoCached.
   // Viewport/scissor state is window-level; invalidate conservatively.
   m_glStateCached = false;
@@ -1284,13 +1293,22 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
   if (!drmBuf)
     return false;
 
+  // Skip re-import when displaying the same source frame again (e.g. 24fps
+  // content re-rendered at 60Hz display rate).  The EGLImage and pl_tex from
+  // the previous upload are still valid — only the render output changes.
+  if (buf.videoBuffer == m_lastUploadedBuffer[index] && plbuf.loaded)
+    return true;
+
   // DV content: per-plane import for full RPU reshaping in libplacebo.
   // Requires EGL interop and that the DRM format can be split into single-
   // component planes. Falls through to the fast single-OES path on failure.
   if (buf.plColorRepr.dovi != nullptr && m_eglCreateImageKHR)
   {
     if (UploadDRMPRIMEPlanes(index, plbuf))
+    {
+      m_lastUploadedBuffer[index] = buf.videoBuffer;
       return true;
+    }
     CLog::Log(LOGWARNING, "CLinuxRendererPLBase::UploadDRMPRIME - per-plane DV import failed, "
                           "falling back to single-OES (DV reshaping will be unavailable)");
   }
@@ -1377,6 +1395,7 @@ bool CLinuxRendererPLBase<TBase>::UploadDRMPRIME(int index, PLBuffer& plbuf)
       ExportDmaBufSyncFence(desc->objects[0].fd, index, plbuf);
   }
 
+  m_lastUploadedBuffer[index] = buf.videoBuffer;
   plbuf.loaded = true;
   buf.loaded = true;
   return true;
@@ -2148,9 +2167,15 @@ bool CLinuxRendererPLBase<TBase>::RenderHook(int idx)
   pl_render_params params = m_plConfig->GetOptions()->params;
   params.border = PL_CLEAR_SKIP;
 
-  // Don't cache single-display frames in GPU memory — most frames are shown once
-  // and immediately replaced. Caching wastes VRAM and upload bandwidth.
-  params.skip_caching_single_frame = true;
+  // When frame mixing is active, each source frame is typically shown once
+  // (the mixer interpolates between adjacent frames).  Caching the rendered
+  // output wastes VRAM because it will never be reused.
+  // When frame mixing is OFF, source fps < display fps means the same frame
+  // is rendered multiple times (e.g. 24fps on 60Hz = ~2.5×).  Enabling the
+  // cache lets libplacebo detect the same source pl_tex and skip the full
+  // render pipeline on repeated displays — a cheap blit instead of a full
+  // 4K→1080p downscale + tone map + colour management chain.
+  params.skip_caching_single_frame = (params.frame_mixer != nullptr);
 
   // Keep frame mixing cache across renders when interpolation is active.
   // Disable interpolation entirely for still images (no adjacent frames to mix).
@@ -2390,6 +2415,7 @@ void CLinuxRendererPLBase<TBase>::ReleasePLBuffer(int index)
   }
 
   m_drmTextures[index].Unmap();
+  m_lastUploadedBuffer[index] = nullptr;
 
   // For DRMPRIME, the pl_tex wrapper is owned by m_drmTexCache and reused across
   // frames (the underlying GL texture ID is stable). Don't destroy it here — just

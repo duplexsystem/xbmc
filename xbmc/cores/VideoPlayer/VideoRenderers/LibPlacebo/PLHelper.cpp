@@ -197,7 +197,7 @@ void PL::RenderConfig::ResetCmsState()
 }
 
 void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
-                                         const CVideoSettings& videoSettings) const
+                                         const CVideoSettings& videoSettings)
 {
   pl_options_reset(m_plOpts, nullptr);
 
@@ -266,6 +266,10 @@ void PL::RenderConfig::UpdateVideoFilter(ESCALINGMETHOD scalingMethod,
       m_plOpts->params.color_adjustment = &m_plOpts->color_adjustment;
     }
   }
+
+  // Cache CMS settings so ApplyCMS (called per-frame) can skip settings lookups.
+  m_cachedCmsEnabled = settings->GetBool("videoscreen.cmsenabled");
+  m_cachedCmsMode = settings->GetInt("videoscreen.cmsmode");
 }
 
 void PL::RenderConfig::UpdateCmsLut(AVColorPrimaries srcPrimaries)
@@ -369,10 +373,10 @@ void PL::RenderConfig::UpdateIccProfile()
 
 void PL::RenderConfig::ApplyCMS(pl_frame& frameOut, AVColorPrimaries srcPrimaries)
 {
-  const auto cmsSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  const bool cmsEnabled = cmsSettings->GetBool("videoscreen.cmsenabled");
-  const int cmsMode = cmsSettings->GetInt("videoscreen.cmsmode");
-  if (cmsEnabled && cmsMode == CMS_MODE_PROFILE)
+  if (!m_cachedCmsEnabled)
+    return;
+
+  if (m_cachedCmsMode == CMS_MODE_PROFILE)
   {
     UpdateIccProfile();
     if (m_iccObject)

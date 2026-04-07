@@ -223,7 +223,7 @@ public:
   ~RenderConfig();
 
   // Applies Kodi GUI video settings (brightness, quality, algorithms)
-  void UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings) const;
+  void UpdateVideoFilter(ESCALINGMETHOD scalingMethod, const CVideoSettings& videoSettings);
 
   // Reloads CMS LUT / ICC profile based on settings
   void ApplyCMS(pl_frame& frameOut, AVColorPrimaries srcPrimaries);
@@ -238,6 +238,10 @@ private:
   void UpdateIccProfile();
 
   pl_options m_plOpts{nullptr};
+
+  // Cached CMS settings — refreshed in UpdateVideoFilter(), not per-frame.
+  bool m_cachedCmsEnabled{false};
+  int m_cachedCmsMode{0};
 
   std::unique_ptr<CColorManager> m_plCmsManager;
   pl_icc_object m_iccObject{nullptr};
